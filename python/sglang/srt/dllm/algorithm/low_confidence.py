@@ -1,3 +1,4 @@
+import json
 from typing import List, Tuple, Union
 
 import numpy as np
@@ -19,6 +20,8 @@ class LowConfidence(DllmAlgorithm):
     ):
         super().__init__(config)
         self.threshold = config.algorithm_config.get("threshold", 0.95)
+        # When set, append per-block step counts (JSONL) to this file for analysis.
+        self.step_log_file = config.algorithm_config.get("step_log_file", None)
 
     def run(
         self,
@@ -48,7 +51,10 @@ class LowConfidence(DllmAlgorithm):
             start = self.block_size - torch.sum(block_mask_index).item()
             start_list.append(start)
 
-        for _ in range(self.block_size):
+        # block_steps[i] = actual forward passes needed to fully unmask block i
+        block_steps = [0] * batch_size
+
+        for step in range(self.block_size):
             mask_index = forward_batch.input_ids == self.mask_id
             if torch.sum(mask_index).item() == 0:
                 break
@@ -65,6 +71,9 @@ class LowConfidence(DllmAlgorithm):
                 block_mask_index = block_input_ids == self.mask_id
                 if torch.sum(block_mask_index).item() == 0:
                     continue
+
+                block_steps[batch_id] = step + 1
+
                 curr_logits = logits_output.full_logits[
                     curr_block_start:curr_block_end,
                 ]
@@ -88,6 +97,10 @@ class LowConfidence(DllmAlgorithm):
                     transfer_index[select_index] = True
 
                 block_input_ids[transfer_index] = x[transfer_index]
+
+        if self.step_log_file is not None:
+            with open(self.step_log_file, "a") as f:
+                f.write(json.dumps(block_steps) + "\n")
 
         out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
         logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph

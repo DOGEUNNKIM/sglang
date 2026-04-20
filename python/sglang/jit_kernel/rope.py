@@ -172,6 +172,8 @@ def apply_rope_inplace_with_kvcache(
     rope_dim = rope_dim or cos_sin_cache.size(-1)
     v = v.view_as(k)
     module = _jit_fused_rope_module(is_neox, rope_dim, q.dtype)
+    if out_loc.dtype != positions.dtype:
+        out_loc = out_loc.to(positions.dtype)
     module.run_rope_store(q, k, v, k_cache, v_cache, cos_sin_cache, positions, out_loc)
 
 

@@ -119,6 +119,18 @@ if _is_cuda:
     except ImportError:
         fused_topk_deepseek = None
 
+    # fused_topk_deepseek requires sm_90+ (Hopper). Disable on older GPUs
+    # (e.g. A100/sm_80) so that the moe_fused_gate fallback is used instead.
+    if fused_topk_deepseek is not None:
+        _sm_major, _ = torch.cuda.get_device_capability()
+        if _sm_major < 9:
+            logger.info(
+                "Disabling fused_topk_deepseek: requires sm_90+, "
+                "current GPU is sm_%d0. Falling back to moe_fused_gate.",
+                _sm_major,
+            )
+            fused_topk_deepseek = None
+
     try:
         from sgl_kernel import kimi_k2_moe_fused_gate
     except ImportError as e:
