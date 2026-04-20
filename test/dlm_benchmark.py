@@ -29,7 +29,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
 os.environ.setdefault("OPENAI_API_KEY", "EMPTY")
@@ -48,18 +48,57 @@ def clear_step_log():
         pass
 
 
-def read_step_log() -> List[int]:
-    """JSONL에서 모든 block_steps를 flat list로 읽어 반환."""
-    all_steps = []
+def _flatten_steps(values) -> List[int]:
+    flat_steps: List[int] = []
+    if values is None:
+        return flat_steps
+    if not isinstance(values, list):
+        return [int(values)]
+    for value in values:
+        if isinstance(value, list):
+            flat_steps.extend(_flatten_steps(value))
+        else:
+            flat_steps.append(int(value))
+    return flat_steps
+
+
+def _normalize_step_record(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, dict):
+        raw_forward_calls = raw.get("raw_forward_calls")
+        block_steps = _flatten_steps(raw.get("block_steps", []))
+    else:
+        raw_forward_calls = None
+        block_steps = _flatten_steps(raw)
+    return {
+        "raw_forward_calls": (
+            int(raw_forward_calls) if raw_forward_calls is not None else None
+        ),
+        "block_steps": block_steps,
+    }
+
+
+def read_step_log() -> Dict[str, Any]:
+    """JSONL에서 raw forward calls와 block steps를 읽어 반환."""
+    step_records = []
+    raw_forward_calls = []
+    block_steps = []
     try:
         with open(STEP_LOG_FILE) as f:
             for line in f:
                 line = line.strip()
                 if line:
-                    all_steps.extend(json.loads(line))
+                    record = _normalize_step_record(json.loads(line))
+                    step_records.append(record)
+                    if record["raw_forward_calls"] is not None:
+                        raw_forward_calls.append(record["raw_forward_calls"])
+                    block_steps.extend(record["block_steps"])
     except FileNotFoundError:
         pass
-    return all_steps
+    return {
+        "records": step_records,
+        "raw_forward_calls": raw_forward_calls,
+        "block_steps": block_steps,
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -257,7 +296,7 @@ def run_task(task: str, base_url: str, model: str,
 # ──────────────────────────────────────────────────────────────────────────────
 
 def plot_step_distributions(
-    step_data: Dict[str, List[int]],
+    step_data: Dict[str, Dict[str, List[int]]],
     block_size: int,
     model_name: str,
     output_dir: str,
@@ -265,49 +304,149 @@ def plot_step_distributions(
     import matplotlib.pyplot as plt
     import numpy as np
 
-    tasks = [t for t, steps in step_data.items() if steps]
+    def _hist_pct(values: List[int], upper: int):
+        bins = range(1, upper + 2)
+        counts, edges = np.histogram(values, bins=bins)
+        pct = counts / counts.sum() * 100 if counts.sum() else counts
+        return pct, edges
+
+    def _stats_text(values: List[int]) -> str:
+        return (
+            f"n={len(values)}\n"
+            f"mean={np.mean(values):.2f}\n"
+            f"median={np.median(values):.1f}\n"
+            f"max={max(values)}"
+        )
+
+    def _tick_step(upper: int) -> int:
+        return max(1, upper // 8)
+
+    tasks = [
+        task
+        for task, metrics in step_data.items()
+        if metrics.get("raw_forward_calls") or metrics.get("block_steps")
+    ]
     if not tasks:
         print("[plot] step 데이터 없음 (step_log_file 설정 확인)")
         return
 
-    fig, axes = plt.subplots(1, len(tasks), figsize=(5 * len(tasks), 4), sharey=False)
+    forward_upper = max(
+        [
+            max(step_data[t]["raw_forward_calls"])
+            for t in tasks
+            if step_data[t]["raw_forward_calls"]
+        ],
+        default=block_size,
+    )
+    block_upper = max(
+        block_size,
+        max(
+            [max(step_data[t]["block_steps"]) for t in tasks if step_data[t]["block_steps"]],
+            default=block_size,
+        ),
+    )
+
+    fig, axes = plt.subplots(2, len(tasks), figsize=(5 * len(tasks), 8), sharey=False)
     if len(tasks) == 1:
-        axes = [axes]
+        axes = [[axes[0]], [axes[1]]]
 
     colors = {"gsm8k": "#4C72B0", "humaneval": "#DD8452", "math": "#55A868"}
 
-    for ax, task in zip(axes, tasks):
-        steps = step_data[task]
-        bins = range(1, block_size + 2)  # 1 ~ block_size
+    for idx, task in enumerate(tasks):
+        raw_forward_calls = step_data[task].get("raw_forward_calls", [])
+        block_steps = step_data[task].get("block_steps", [])
+        color = colors.get(task, "#777")
 
-        counts, edges = np.histogram(steps, bins=bins)
-        pct = counts / counts.sum() * 100
+        forward_ax = axes[0][idx]
+        block_ax = axes[1][idx]
 
-        ax.bar(edges[:-1], pct, width=0.8, align="center",
-               color=colors.get(task, "#777"), edgecolor="white", linewidth=0.5)
+        if raw_forward_calls:
+            pct, edges = _hist_pct(raw_forward_calls, forward_upper)
+            forward_ax.bar(
+                edges[:-1],
+                pct,
+                width=0.8,
+                align="center",
+                color=color,
+                edgecolor="white",
+                linewidth=0.5,
+            )
+            mean_val = np.mean(raw_forward_calls)
+            forward_ax.axvline(
+                mean_val,
+                color="red",
+                linestyle="--",
+                linewidth=1.2,
+                label=f"mean={mean_val:.2f}",
+            )
+            forward_ax.text(
+                0.97,
+                0.97,
+                _stats_text(raw_forward_calls),
+                transform=forward_ax.transAxes,
+                fontsize=8,
+                va="top",
+                ha="right",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
+            )
+            forward_ax.legend(fontsize=9)
+        else:
+            forward_ax.text(0.5, 0.5, "no forward-call data", ha="center", va="center")
 
-        mean_val = np.mean(steps)
-        ax.axvline(mean_val, color="red", linestyle="--", linewidth=1.2,
-                   label=f"mean={mean_val:.2f}")
+        forward_ax.set_title(
+            f"{task.upper()} — forward calls", fontsize=13, fontweight="bold"
+        )
+        forward_ax.set_xlabel("Raw forward calls per run", fontsize=11)
+        forward_ax.set_ylabel("Runs (%)", fontsize=11)
+        forward_ax.set_xticks(range(1, forward_upper + 1, _tick_step(forward_upper)))
+        forward_ax.set_xlim(0.4, forward_upper + 0.6)
 
-        ax.set_title(task.upper(), fontsize=13, fontweight="bold")
-        ax.set_xlabel("Steps per block", fontsize=11)
-        ax.set_ylabel("Blocks (%)", fontsize=11)
-        ax.set_xticks(range(1, block_size + 1))
-        ax.set_xlim(0.4, block_size + 0.6)
-        ax.legend(fontsize=9)
+        if block_steps:
+            pct, edges = _hist_pct(block_steps, block_upper)
+            block_ax.bar(
+                edges[:-1],
+                pct,
+                width=0.8,
+                align="center",
+                color=color,
+                edgecolor="white",
+                linewidth=0.5,
+            )
+            mean_val = np.mean(block_steps)
+            block_ax.axvline(
+                mean_val,
+                color="red",
+                linestyle="--",
+                linewidth=1.2,
+                label=f"mean={mean_val:.2f}",
+            )
+            block_ax.text(
+                0.97,
+                0.97,
+                _stats_text(block_steps),
+                transform=block_ax.transAxes,
+                fontsize=8,
+                va="top",
+                ha="right",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
+            )
+            block_ax.legend(fontsize=9)
+        else:
+            block_ax.text(0.5, 0.5, "no block-step data", ha="center", va="center")
 
-        # 통계 텍스트
-        stats_txt = (f"n={len(steps)}\n"
-                     f"mean={mean_val:.2f}\n"
-                     f"median={np.median(steps):.1f}\n"
-                     f"max={max(steps)}")
-        ax.text(0.97, 0.97, stats_txt, transform=ax.transAxes,
-                fontsize=8, va="top", ha="right",
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7))
+        block_ax.set_title(
+            f"{task.upper()} — block steps", fontsize=13, fontweight="bold"
+        )
+        block_ax.set_xlabel("Steps per block", fontsize=11)
+        block_ax.set_ylabel("Blocks (%)", fontsize=11)
+        block_ax.set_xticks(range(1, block_upper + 1, _tick_step(block_upper)))
+        block_ax.set_xlim(0.4, block_upper + 0.6)
 
     model_tag = model_name.replace("/", "_")
-    fig.suptitle(f"Block-level unmask steps — {model_name}", fontsize=13)
+    fig.suptitle(
+        f"Raw forward calls per run and unmask steps per block — {model_name}",
+        fontsize=13,
+    )
     fig.tight_layout()
 
     out_path = Path(output_dir) / f"step_dist_{model_tag}.png"
@@ -316,18 +455,44 @@ def plot_step_distributions(
     plt.close(fig)
 
     # task 간 비교 (box plot)
-    fig2, ax2 = plt.subplots(figsize=(6, 4))
-    data_list = [step_data[t] for t in tasks]
-    bp = ax2.boxplot(data_list, labels=[t.upper() for t in tasks],
-                     patch_artist=True, notch=False)
-    for patch, task in zip(bp["boxes"], tasks):
-        patch.set_facecolor(colors.get(task, "#777"))
-        patch.set_alpha(0.7)
+    fig2, axes2 = plt.subplots(1, 2, figsize=(max(8, 2.5 * len(tasks) + 3), 4))
+    forward_tasks = [task for task in tasks if step_data[task].get("raw_forward_calls")]
+    block_tasks = [task for task in tasks if step_data[task].get("block_steps")]
 
-    ax2.set_ylabel("Steps per block", fontsize=11)
-    ax2.set_title(f"Step distribution by task — {model_name}", fontsize=12)
-    ax2.yaxis.grid(True, linestyle="--", alpha=0.6)
-    ax2.set_yticks(range(1, block_size + 1))
+    if forward_tasks:
+        forward_bp = axes2[0].boxplot(
+            [step_data[t]["raw_forward_calls"] for t in forward_tasks],
+            labels=[t.upper() for t in forward_tasks],
+            patch_artist=True,
+            notch=False,
+        )
+        for patch, task in zip(forward_bp["boxes"], forward_tasks):
+            patch.set_facecolor(colors.get(task, "#777"))
+            patch.set_alpha(0.7)
+        axes2[0].set_ylabel("Raw forward calls per run", fontsize=11)
+        axes2[0].set_title("Forward-call distribution by task", fontsize=12)
+        axes2[0].yaxis.grid(True, linestyle="--", alpha=0.6)
+    else:
+        axes2[0].text(0.5, 0.5, "no forward-call data", ha="center", va="center")
+        axes2[0].set_axis_off()
+
+    if block_tasks:
+        block_bp = axes2[1].boxplot(
+            [step_data[t]["block_steps"] for t in block_tasks],
+            labels=[t.upper() for t in block_tasks],
+            patch_artist=True,
+            notch=False,
+        )
+        for patch, task in zip(block_bp["boxes"], block_tasks):
+            patch.set_facecolor(colors.get(task, "#777"))
+            patch.set_alpha(0.7)
+        axes2[1].set_ylabel("Steps per block", fontsize=11)
+        axes2[1].set_title("Block-step distribution by task", fontsize=12)
+        axes2[1].yaxis.grid(True, linestyle="--", alpha=0.6)
+        axes2[1].set_yticks(range(1, block_upper + 1, _tick_step(block_upper)))
+    else:
+        axes2[1].text(0.5, 0.5, "no block-step data", ha="center", va="center")
+        axes2[1].set_axis_off()
 
     out_path2 = Path(output_dir) / f"step_boxplot_{model_tag}.png"
     fig2.tight_layout()
@@ -403,7 +568,7 @@ def main():
             model = args.model_path
 
         all_results: Dict[str, Dict] = {}
-        step_data: Dict[str, List[int]] = {}
+        step_data: Dict[str, Dict[str, List[int]]] = {}
 
         for task in args.tasks:
             print(f"\n{'='*60}")
@@ -424,24 +589,36 @@ def main():
             )
             all_results[task] = metrics
 
-            steps = read_step_log()
-            step_data[task] = steps
+            step_metrics = read_step_log()
+            raw_forward_calls = step_metrics["raw_forward_calls"]
+            block_steps = step_metrics["block_steps"]
+            step_data[task] = {
+                "raw_forward_calls": raw_forward_calls,
+                "block_steps": block_steps,
+            }
             # task별 raw step 파일에 복사 (plot 스크립트가 나중에 읽을 수 있도록)
-            if steps:
+            if step_metrics["records"]:
                 task_step_file = Path(args.output_dir) / f"steps_{task}.jsonl"
                 with open(task_step_file, "w") as f:
-                    f.write(json.dumps(steps) + "\n")
+                    for record in step_metrics["records"]:
+                        f.write(json.dumps(record) + "\n")
 
             score = metrics.get("score")
             score_str = f"{score:.4f}" if score is not None else "N/A"
             print(f"\n[{task}] score={score_str}  "
                   f"throughput={metrics.get('output_throughput_tok_s', 0):.1f} tok/s")
-            if steps:
+            if raw_forward_calls:
                 import numpy as np
-                print(f"[{task}] step stats: n={len(steps)}  "
-                      f"mean={np.mean(steps):.2f}  "
-                      f"median={np.median(steps):.1f}  "
-                      f"max={max(steps)}")
+                print(f"[{task}] forward call stats: n={len(raw_forward_calls)}  "
+                      f"mean={np.mean(raw_forward_calls):.2f}  "
+                      f"median={np.median(raw_forward_calls):.1f}  "
+                      f"max={max(raw_forward_calls)}")
+            if block_steps:
+                import numpy as np
+                print(f"[{task}] block step stats: n={len(block_steps)}  "
+                      f"mean={np.mean(block_steps):.2f}  "
+                      f"median={np.median(block_steps):.1f}  "
+                      f"max={max(block_steps)}")
 
             # task별 결과 저장
             model_tag = model.replace("/", "_")
@@ -449,9 +626,22 @@ def main():
             with open(out_path, "w") as f:
                 json.dump({"task": task, "model": model,
                            "step_stats": {
-                               "n_blocks": len(steps),
-                               "mean": float(sum(steps) / len(steps)) if steps else None,
-                               "max": max(steps) if steps else None,
+                               "n_runs": len(raw_forward_calls),
+                               "mean_raw_forward_calls": (
+                                   float(sum(raw_forward_calls) / len(raw_forward_calls))
+                                   if raw_forward_calls else None
+                               ),
+                               "max_raw_forward_calls": (
+                                   max(raw_forward_calls) if raw_forward_calls else None
+                               ),
+                               "n_blocks": len(block_steps),
+                               "mean_block_steps": (
+                                   float(sum(block_steps) / len(block_steps))
+                                   if block_steps else None
+                               ),
+                               "max_block_steps": (
+                                   max(block_steps) if block_steps else None
+                               ),
                            },
                            **metrics}, f, indent=2)
 
@@ -472,7 +662,11 @@ def main():
         # ── 플롯 ─────────────────────────────────────────────────
         block_size = args.block_size
         if block_size is None:
-            all_steps_flat = [s for v in step_data.values() for s in v]
+            all_steps_flat = [
+                step
+                for metrics in step_data.values()
+                for step in metrics.get("block_steps", [])
+            ]
             block_size = max(all_steps_flat) if all_steps_flat else 32
 
         plot_step_distributions(step_data, block_size=block_size,

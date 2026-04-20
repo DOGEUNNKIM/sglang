@@ -29,6 +29,7 @@ class LowConfidence(DllmAlgorithm):
         forward_batch: ForwardBatch,
     ) -> Tuple[Union[LogitsProcessorOutput, torch.Tensor], List[torch.Tensor], bool]:
         batch_size = forward_batch.batch_size
+        raw_forward_calls = 0
         # Here, the forward_batch full logits contains all the blocks
         # such as [dllm_block_size * batch_size, hidden_size]
         start_list = []
@@ -37,7 +38,21 @@ class LowConfidence(DllmAlgorithm):
         # Fast path: if there is no mask token, forward and save kv cache
         if torch.sum(mask_index).item() == 0:
             out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
+            raw_forward_calls += 1
             logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
+
+            if self.step_log_file is not None:
+                with open(self.step_log_file, "a") as f:
+                    f.write(
+                        json.dumps(
+                            {
+                                "raw_forward_calls": raw_forward_calls,
+                                "unmask_steps": 0,
+                                "block_steps": [],
+                            }
+                        )
+                        + "\n"
+                    )
 
             next_token_ids = []
             return logits_output, next_token_ids, can_run_cuda_graph
@@ -53,6 +68,7 @@ class LowConfidence(DllmAlgorithm):
 
         # block_steps[i] = actual forward passes needed to fully unmask block i
         block_steps = [0] * batch_size
+        unmask_steps = 0
 
         for step in range(self.block_size):
             mask_index = forward_batch.input_ids == self.mask_id
@@ -60,6 +76,8 @@ class LowConfidence(DllmAlgorithm):
                 break
 
             out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
+            raw_forward_calls += 1
+            unmask_steps += 1
             logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
             assert batch_size == forward_batch.input_ids.shape[0] // self.block_size
             for batch_id in range(batch_size):
@@ -98,12 +116,23 @@ class LowConfidence(DllmAlgorithm):
 
                 block_input_ids[transfer_index] = x[transfer_index]
 
+        out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
+        raw_forward_calls += 1
+        logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
+
         if self.step_log_file is not None:
             with open(self.step_log_file, "a") as f:
-                f.write(json.dumps(block_steps) + "\n")
+                f.write(
+                    json.dumps(
+                        {
+                            "raw_forward_calls": raw_forward_calls,
+                            "unmask_steps": unmask_steps,
+                            "block_steps": block_steps,
+                        }
+                    )
+                    + "\n"
+                )
 
-        out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
-        logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
         # Here next token ids is tricky to implement the dynamic lengths,
         # so we return a list of tensors
         next_token_ids = torch.reshape(forward_batch.input_ids, (batch_size, -1))
