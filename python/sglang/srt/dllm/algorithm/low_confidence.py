@@ -27,7 +27,13 @@ class LowConfidence(DllmAlgorithm):
         self,
         model_runner: ModelRunner,
         forward_batch: ForwardBatch,
-    ) -> Tuple[Union[LogitsProcessorOutput, torch.Tensor], List[torch.Tensor], bool]:
+    ) -> Tuple[
+        Union[LogitsProcessorOutput, torch.Tensor],
+        List[torch.Tensor],
+        bool,
+        int,
+        List[int],
+    ]:
         batch_size = forward_batch.batch_size
         raw_forward_calls = 0
         # Here, the forward_batch full logits contains all the blocks
@@ -55,7 +61,13 @@ class LowConfidence(DllmAlgorithm):
                     )
 
             next_token_ids = []
-            return logits_output, next_token_ids, can_run_cuda_graph
+            return (
+                logits_output,
+                next_token_ids,
+                can_run_cuda_graph,
+                raw_forward_calls,
+                [],
+            )
 
         # Calculate start positions for each block
         for block_id in range(batch_size):
@@ -140,7 +152,13 @@ class LowConfidence(DllmAlgorithm):
             next_token_ids[i, start_list[i] :] for i in range(batch_size)
         ]
 
-        return logits_output, next_token_ids_list, can_run_cuda_graph
+        return (
+            logits_output,
+            next_token_ids_list,
+            can_run_cuda_graph,
+            raw_forward_calls,
+            block_steps,
+        )
 
 
 Algorithm = LowConfidence

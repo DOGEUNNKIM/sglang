@@ -39,6 +39,8 @@ os.environ.setdefault("OPENAI_API_KEY", "EMPTY")
 # ──────────────────────────────────────────────────────────────────────────────
 
 STEP_LOG_FILE = "/tmp/dlm_step_stats.jsonl"
+REQUEST_LATENCY_LOG_FILE = "/tmp/dlm_request_latency.jsonl"
+BATCH_LATENCY_LOG_FILE = "/tmp/dlm_batch_latency.jsonl"
 
 
 def clear_step_log():
@@ -46,6 +48,34 @@ def clear_step_log():
         os.remove(STEP_LOG_FILE)
     except FileNotFoundError:
         pass
+
+
+def clear_latency_logs():
+    for path in (REQUEST_LATENCY_LOG_FILE, BATCH_LATENCY_LOG_FILE):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+
+def _read_jsonl(path: str) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+    except FileNotFoundError:
+        pass
+    return records
+
+
+def read_latency_logs() -> Dict[str, List[Dict[str, Any]]]:
+    return {
+        "request": _read_jsonl(REQUEST_LATENCY_LOG_FILE),
+        "batch": _read_jsonl(BATCH_LATENCY_LOG_FILE),
+    }
 
 
 def _flatten_steps(values) -> List[int]:
@@ -209,6 +239,8 @@ def launch_server(args) -> subprocess.Popen:
     with open(config_path, "w") as f:
         f.write(f"threshold: {args.threshold}\n")
         f.write(f"step_log_file: {STEP_LOG_FILE}\n")
+        f.write(f"request_latency_log_file: {REQUEST_LATENCY_LOG_FILE}\n")
+        f.write(f"batch_latency_log_file: {BATCH_LATENCY_LOG_FILE}\n")
 
     cmd = [
         sys.executable, "-m", "sglang.launch_server",
@@ -501,6 +533,371 @@ def plot_step_distributions(
     plt.close(fig2)
 
 
+def _values(records: List[Dict[str, Any]], key: str) -> List[float]:
+    return [
+        float(record[key])
+        for record in records
+        if record.get(key) is not None
+    ]
+
+
+def _weighted_batch_mean(
+    records: List[Dict[str, Any]],
+    phase: str,
+    value_key: str,
+    weight_key: str,
+) -> Optional[float]:
+    total = 0.0
+    weight_sum = 0
+    for record in records:
+        if record.get("phase") != phase:
+            continue
+        value = record.get(value_key)
+        weight = int(record.get(weight_key) or 0)
+        if value is None or weight <= 0:
+            continue
+        total += float(value) * weight
+        weight_sum += weight
+    return total / weight_sum if weight_sum > 0 else None
+
+
+REQ_PHASE_LABELS = {
+    "incoming_prefill": "initial prefill",
+    "staging_prefill": "staging prefill",
+    "incoming_decode": "initial decode",
+    "staging_decode": "staging decode",
+}
+
+
+def _weighted_mean_by_count(
+    records: List[Dict[str, Any]],
+    value_key: str,
+    count_key: str,
+) -> Optional[float]:
+    total = 0.0
+    count_sum = 0
+    for record in records:
+        value = record.get(value_key)
+        count = int(record.get(count_key) or 0)
+        if value is None or count <= 0:
+            continue
+        total += float(value) * count
+        count_sum += count
+    return total / count_sum if count_sum > 0 else None
+
+
+def _count_per_req_phases(records: List[Dict[str, Any]]) -> Dict[str, int]:
+    counts = {phase: 0 for phase in REQ_PHASE_LABELS}
+    for record in records:
+        for phase in record.get("per_req_phase") or []:
+            if phase in counts:
+                counts[phase] += 1
+            elif phase is not None:
+                counts[phase] = counts.get(phase, 0) + 1
+    return counts
+
+
+def _batch_visual_phase(record: Dict[str, Any]) -> str:
+    phases = set(record.get("per_req_phase") or [])
+    has_mask = record.get("per_req_has_mask") or []
+    if has_mask and any(has_mask) and any(not value for value in has_mask):
+        return "mixed"
+    if has_mask and any(has_mask):
+        return "decode"
+    if "incoming_prefill" in phases:
+        return "initial_prefill"
+    if "staging_prefill" in phases:
+        return "staging_prefill"
+    return record.get("phase", "unknown")
+
+
+def summarize_latency_metrics(
+    request_records: List[Dict[str, Any]],
+    batch_records: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    import numpy as np
+
+    ttfb_ms = _values(request_records, "ttfb_ms")
+    tpob_ms = _values(request_records, "tpob_ms")
+    avg_prefill_req_ms = _weighted_batch_mean(
+        batch_records, "prefill", "duration_ms", "num_reqs"
+    )
+    avg_decode_block_ms = _weighted_batch_mean(
+        batch_records, "decode", "duration_ms", "num_output_blocks"
+    )
+    avg_initial_prefill_req_ms = _weighted_mean_by_count(
+        batch_records, "duration_ms", "num_initial_prefill_reqs"
+    )
+    avg_staging_prefill_req_ms = _weighted_mean_by_count(
+        batch_records, "duration_ms", "num_staging_prefill_reqs"
+    )
+    avg_actual_decode_block_ms = _weighted_mean_by_count(
+        batch_records, "duration_ms", "num_output_blocks"
+    )
+    phase_sequence = [record.get("phase") for record in batch_records]
+    req_phase_counts = _count_per_req_phases(batch_records)
+
+    return {
+        "n_request_records": len(request_records),
+        "mean_ttfb_ms": float(np.mean(ttfb_ms)) if ttfb_ms else None,
+        "mean_tpob_ms": float(np.mean(tpob_ms)) if tpob_ms else None,
+        "n_batch_records": len(batch_records),
+        "avg_prefill_req_ms": avg_prefill_req_ms,
+        "avg_decode_block_ms": avg_decode_block_ms,
+        "avg_initial_prefill_req_ms": avg_initial_prefill_req_ms,
+        "avg_staging_prefill_req_ms": avg_staging_prefill_req_ms,
+        "avg_actual_decode_block_ms": avg_actual_decode_block_ms,
+        "request_phase_counts": req_phase_counts,
+        "mixed_mask_batches": sum(
+            1 for record in batch_records if record.get("is_mixed_mask_batch")
+        ),
+        "prefill_batches": phase_sequence.count("prefill"),
+        "decode_batches": phase_sequence.count("decode"),
+        "phase_switches": sum(
+            1
+            for prev, cur in zip(phase_sequence, phase_sequence[1:])
+            if prev != cur
+        ),
+    }
+
+
+def plot_latency_metrics(
+    latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]],
+    model_name: str,
+    output_dir: str,
+):
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    tasks = [
+        task
+        for task, records in latency_data.items()
+        if records.get("request") or records.get("batch")
+    ]
+    if not tasks:
+        print("[plot] latency 데이터 없음 (request/batch latency log 설정 확인)")
+        return
+
+    colors = {"gsm8k": "#4C72B0", "humaneval": "#DD8452", "math": "#55A868"}
+    model_tag = model_name.replace("/", "_")
+
+    # ── Request-level TTFB/TPOB box plots ─────────────────────────────
+    fig, axes = plt.subplots(1, 2, figsize=(max(8, 2.8 * len(tasks) + 3), 4))
+    for ax, key, title in [
+        (axes[0], "ttfb_ms", "TTFB per request"),
+        (axes[1], "tpob_ms", "Mean TPOB per request"),
+    ]:
+        plot_tasks = [
+            task for task in tasks if _values(latency_data[task]["request"], key)
+        ]
+        if plot_tasks:
+            data = [
+                _values(latency_data[task]["request"], key)
+                for task in plot_tasks
+            ]
+            bp = ax.boxplot(
+                data,
+                labels=[task.upper() for task in plot_tasks],
+                patch_artist=True,
+                notch=False,
+            )
+            for patch, task in zip(bp["boxes"], plot_tasks):
+                patch.set_facecolor(colors.get(task, "#777"))
+                patch.set_alpha(0.7)
+            ax.set_ylabel("Latency (ms)")
+            ax.set_title(title)
+            ax.yaxis.grid(True, linestyle="--", alpha=0.5)
+        else:
+            ax.text(0.5, 0.5, f"no {key} data", ha="center", va="center")
+            ax.set_axis_off()
+
+    out_path = Path(output_dir) / f"request_latency_{model_tag}.png"
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"[plot] saved → {out_path}")
+    plt.close(fig)
+
+    # ── Average initial/staging prefill request / decode block time ───
+    initial_prefill_vals = [
+        _weighted_mean_by_count(
+            latency_data[task]["batch"], "duration_ms", "num_initial_prefill_reqs"
+        )
+        for task in tasks
+    ]
+    staging_prefill_vals = [
+        _weighted_mean_by_count(
+            latency_data[task]["batch"], "duration_ms", "num_staging_prefill_reqs"
+        )
+        for task in tasks
+    ]
+    decode_vals = [
+        _weighted_mean_by_count(
+            latency_data[task]["batch"], "duration_ms", "num_output_blocks"
+        )
+        for task in tasks
+    ]
+
+    fig2, ax2 = plt.subplots(figsize=(max(7, 2.5 * len(tasks)), 4))
+    x = np.arange(len(tasks))
+    width = 0.26
+    initial_prefill_plot = [0.0 if v is None else v for v in initial_prefill_vals]
+    staging_prefill_plot = [0.0 if v is None else v for v in staging_prefill_vals]
+    decode_plot = [0.0 if v is None else v for v in decode_vals]
+    ax2.bar(
+        x - width,
+        initial_prefill_plot,
+        width,
+        label="Initial prefill req avg",
+        color="#74A9CF",
+    )
+    ax2.bar(
+        x,
+        staging_prefill_plot,
+        width,
+        label="Staging prefill req avg",
+        color="#6BA292",
+    )
+    ax2.bar(
+        x + width,
+        decode_plot,
+        width,
+        label="Decode block avg",
+        color="#C44E52",
+    )
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([task.upper() for task in tasks])
+    ax2.set_ylabel("Latency (ms)")
+    ax2.set_title("Average processing time")
+    ax2.legend()
+    ax2.yaxis.grid(True, linestyle="--", alpha=0.5)
+    for idx, value in enumerate(initial_prefill_vals):
+        if value is not None:
+            ax2.text(idx - width, value, f"{value:.1f}", ha="center", va="bottom", fontsize=8)
+    for idx, value in enumerate(staging_prefill_vals):
+        if value is not None:
+            ax2.text(idx, value, f"{value:.1f}", ha="center", va="bottom", fontsize=8)
+    for idx, value in enumerate(decode_vals):
+        if value is not None:
+            ax2.text(idx + width, value, f"{value:.1f}", ha="center", va="bottom", fontsize=8)
+
+    out_path2 = Path(output_dir) / f"batch_latency_{model_tag}.png"
+    fig2.tight_layout()
+    fig2.savefig(out_path2, dpi=150, bbox_inches="tight")
+    print(f"[plot] saved → {out_path2}")
+    plt.close(fig2)
+
+    # ── Prefill/decode execution order timeline ───────────────────────
+    fig3, ax3 = plt.subplots(figsize=(max(9, 0.18 * max(
+        [len(latency_data[t]["batch"]) for t in tasks] or [1]
+    )), max(3, 0.7 * len(tasks) + 1.5)))
+    phase_color = {
+        "initial_prefill": "#74A9CF",
+        "staging_prefill": "#2C7BB6",
+        "decode": "#D7191C",
+        "mixed": "#Fdae61",
+        "prefill": "#2C7BB6",
+        "unknown": "#777777",
+    }
+    phase_marker = {
+        "initial_prefill": "s",
+        "staging_prefill": "D",
+        "decode": "o",
+        "mixed": "P",
+        "prefill": "s",
+        "unknown": "x",
+    }
+
+    for y, task in enumerate(tasks):
+        batch_records = latency_data[task]["batch"]
+        for fallback_seq, record in enumerate(batch_records):
+            phase = _batch_visual_phase(record)
+            seq = int(record.get("seq") if record.get("seq") is not None else fallback_seq)
+            duration_ms = float(record.get("duration_ms") or 0.0)
+            size = 35 + min(duration_ms, 500.0) * 0.25
+            ax3.scatter(
+                seq,
+                y,
+                s=size,
+                c=phase_color.get(phase, phase_color["unknown"]),
+                marker=phase_marker.get(phase, "x"),
+                alpha=0.8,
+                edgecolors="white",
+                linewidths=0.4,
+            )
+
+    ax3.set_yticks(range(len(tasks)))
+    ax3.set_yticklabels([task.upper() for task in tasks])
+    ax3.set_xlabel("DLM batch sequence")
+    ax3.set_title("DLM execution order by request composition")
+    ax3.grid(True, axis="x", linestyle="--", alpha=0.35)
+    handles = [
+        plt.Line2D([0], [0], marker=phase_marker[p], color="w", label=p.replace("_", " "),
+                   markerfacecolor=phase_color[p], markersize=8)
+        for p in ("initial_prefill", "staging_prefill", "decode", "mixed")
+    ]
+    ax3.legend(handles=handles, loc="upper right")
+
+    out_path3 = Path(output_dir) / f"phase_sequence_{model_tag}.png"
+    fig3.tight_layout()
+    fig3.savefig(out_path3, dpi=150, bbox_inches="tight")
+    print(f"[plot] saved → {out_path3}")
+    plt.close(fig3)
+
+    # ── Per-batch request phase composition ───────────────────────────
+    phase_keys = [
+        "incoming_prefill",
+        "staging_prefill",
+        "incoming_decode",
+        "staging_decode",
+    ]
+    phase_colors = {
+        "incoming_prefill": "#74A9CF",
+        "staging_prefill": "#2C7BB6",
+        "incoming_decode": "#Fdae61",
+        "staging_decode": "#D7191C",
+    }
+    fig4, axes4 = plt.subplots(
+        len(tasks),
+        1,
+        figsize=(max(9, 0.18 * max([len(latency_data[t]["batch"]) for t in tasks] or [1])), max(3, 1.8 * len(tasks))),
+        squeeze=False,
+    )
+    for row, task in enumerate(tasks):
+        ax = axes4[row][0]
+        batch_records = latency_data[task]["batch"]
+        seqs = [
+            int(record.get("seq") if record.get("seq") is not None else idx)
+            for idx, record in enumerate(batch_records)
+        ]
+        bottom = np.zeros(len(batch_records))
+        for phase_key in phase_keys:
+            counts = [
+                (record.get("per_req_phase") or []).count(phase_key)
+                for record in batch_records
+            ]
+            ax.bar(
+                seqs,
+                counts,
+                bottom=bottom,
+                width=0.9,
+                color=phase_colors[phase_key],
+                label=REQ_PHASE_LABELS[phase_key],
+                linewidth=0,
+            )
+            bottom += np.array(counts)
+        ax.set_ylabel(task.upper())
+        ax.grid(True, axis="x", linestyle="--", alpha=0.3)
+        if row == 0:
+            ax.legend(loc="upper right", ncol=2, fontsize=8)
+    axes4[-1][0].set_xlabel("DLM batch sequence")
+    fig4.suptitle("Per-batch request phase composition")
+    out_path4 = Path(output_dir) / f"phase_composition_{model_tag}.png"
+    fig4.tight_layout()
+    fig4.savefig(out_path4, dpi=150, bbox_inches="tight")
+    print(f"[plot] saved → {out_path4}")
+    plt.close(fig4)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────────────────────
@@ -553,7 +950,13 @@ def main():
     # 기존 서버는 반드시 step_log_file 설정된 config로 실행된 상태여야 함.
     # 자동 실행 시 launch_server()가 config yaml을 자동 생성.
     if args.base_url:
-        print(f"[warn] 기존 서버 사용 시 서버가 step_log_file={STEP_LOG_FILE} 로 실행됐는지 확인하세요.")
+        print(
+            "[warn] 기존 서버 사용 시 서버가 "
+            f"step_log_file={STEP_LOG_FILE}, "
+            f"request_latency_log_file={REQUEST_LATENCY_LOG_FILE}, "
+            f"batch_latency_log_file={BATCH_LATENCY_LOG_FILE} "
+            "로 실행됐는지 확인하세요."
+        )
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
@@ -569,6 +972,7 @@ def main():
 
         all_results: Dict[str, Dict] = {}
         step_data: Dict[str, Dict[str, List[int]]] = {}
+        latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
 
         for task in args.tasks:
             print(f"\n{'='*60}")
@@ -576,10 +980,20 @@ def main():
             print(f"{'='*60}")
 
             clear_step_log()
+            clear_latency_logs()
             # 이번 task의 raw step 데이터를 별도 파일에도 저장
             task_step_file = Path(args.output_dir) / f"steps_{task}.jsonl"
             if task_step_file.exists():
                 task_step_file.unlink()
+            task_request_latency_file = (
+                Path(args.output_dir) / f"request_latency_{task}.jsonl"
+            )
+            task_batch_latency_file = (
+                Path(args.output_dir) / f"batch_latency_{task}.jsonl"
+            )
+            for path in (task_request_latency_file, task_batch_latency_file):
+                if path.exists():
+                    path.unlink()
 
             metrics = run_task(
                 task=task, base_url=base_url, model=model,
@@ -596,12 +1010,28 @@ def main():
                 "raw_forward_calls": raw_forward_calls,
                 "block_steps": block_steps,
             }
+            latency_records = read_latency_logs()
+            latency_data[task] = latency_records
             # task별 raw step 파일에 복사 (plot 스크립트가 나중에 읽을 수 있도록)
             if step_metrics["records"]:
                 task_step_file = Path(args.output_dir) / f"steps_{task}.jsonl"
                 with open(task_step_file, "w") as f:
                     for record in step_metrics["records"]:
                         f.write(json.dumps(record) + "\n")
+            if latency_records["request"]:
+                with open(task_request_latency_file, "w") as f:
+                    for record in latency_records["request"]:
+                        f.write(json.dumps(record) + "\n")
+            if latency_records["batch"]:
+                with open(task_batch_latency_file, "w") as f:
+                    for record in latency_records["batch"]:
+                        f.write(json.dumps(record) + "\n")
+
+            latency_summary = summarize_latency_metrics(
+                latency_records["request"],
+                latency_records["batch"],
+            )
+            metrics["latency_stats"] = latency_summary
 
             score = metrics.get("score")
             score_str = f"{score:.4f}" if score is not None else "N/A"
@@ -619,6 +1049,22 @@ def main():
                       f"mean={np.mean(block_steps):.2f}  "
                       f"median={np.median(block_steps):.1f}  "
                       f"max={max(block_steps)}")
+            print(
+                f"[{task}] latency stats: "
+                f"mean_ttfb_ms={latency_summary.get('mean_ttfb_ms')}  "
+                f"mean_tpob_ms={latency_summary.get('mean_tpob_ms')}  "
+                f"avg_prefill_req_ms={latency_summary.get('avg_prefill_req_ms')}  "
+                f"avg_decode_block_ms={latency_summary.get('avg_decode_block_ms')}  "
+                f"initial_prefill_req_ms={latency_summary.get('avg_initial_prefill_req_ms')}  "
+                f"staging_prefill_req_ms={latency_summary.get('avg_staging_prefill_req_ms')}  "
+                f"mixed_batches={latency_summary.get('mixed_mask_batches')}  "
+                f"phase_switches={latency_summary.get('phase_switches')}"
+            )
+            if latency_summary.get("request_phase_counts"):
+                print(
+                    f"[{task}] request phase counts: "
+                    f"{latency_summary['request_phase_counts']}"
+                )
 
             # task별 결과 저장
             model_tag = model.replace("/", "_")
@@ -656,7 +1102,14 @@ def main():
         summary_path = Path(args.output_dir) / f"summary_{model.replace('/', '_')}.json"
         with open(summary_path, "w") as f:
             json.dump({"model": model, "results": all_results,
-                       "step_data": {t: v for t, v in step_data.items()}}, f, indent=2)
+                       "step_data": {t: v for t, v in step_data.items()},
+                       "latency_data": {
+                           t: {
+                               "request": v.get("request", []),
+                               "batch": v.get("batch", []),
+                           }
+                           for t, v in latency_data.items()
+                       }}, f, indent=2)
         print(f"Summary saved → {summary_path}")
 
         # ── 플롯 ─────────────────────────────────────────────────
@@ -671,6 +1124,7 @@ def main():
 
         plot_step_distributions(step_data, block_size=block_size,
                                 model_name=model, output_dir=args.output_dir)
+        plot_latency_metrics(latency_data, model_name=model, output_dir=args.output_dir)
 
     finally:
         if server_proc is not None:

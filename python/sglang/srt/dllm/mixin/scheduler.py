@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import time
 from typing import TYPE_CHECKING, List, Optional, Set, Union
 
 from sglang.srt.dllm.config import DllmConfig
@@ -25,6 +27,18 @@ class SchedulerDllmMixin:
             else None
         )
         self.dllm_manager = DllmManager(dllm_config=self.dllm_config)
+        self.dllm_batch_seq = 0
+        self.dllm_last_batch_phase = None
+        self.dllm_phase_run_length = 0
+        self.dllm_phase_switch_count = 0
+        self.dllm_prefill_batch_count = 0
+        self.dllm_decode_batch_count = 0
+        self.dllm_prefill_req_time_sum = 0.0
+        self.dllm_prefill_req_count = 0
+        self.dllm_prefill_batch_time_sum = 0.0
+        self.dllm_decode_block_time_sum = 0.0
+        self.dllm_decode_block_count = 0
+        self.dllm_decode_batch_time_sum = 0.0
 
     def get_new_batch_dllm(self: Scheduler) -> Optional[ScheduleBatch]:
         """Generate a new batch for DLLM (Diffusion LLM) scheduling."""
@@ -57,7 +71,14 @@ class SchedulerDllmMixin:
         self._update_state_for_batch(can_run_list, adder, running_bs)
 
         # Create and prepare batch
+        schedule_start_time = time.perf_counter()
+        batch_phase = self._get_dllm_batch_phase(can_run_list)
         new_batch = self._create_dllm_batch(can_run_list, forward_mode)
+        self._annotate_dllm_batch_metrics(
+            new_batch,
+            batch_phase=batch_phase,
+            schedule_start_time=schedule_start_time,
+        )
         return new_batch
 
     def process_batch_result_dllm(
@@ -69,6 +90,7 @@ class SchedulerDllmMixin:
             result.copy_done.synchronize()
 
         if result.next_token_ids:
+            block_emit_time = time.perf_counter()
             self.token_to_kv_pool_allocator.free_group_begin()
 
             for idx in range(batch.batch_size()):
@@ -81,6 +103,7 @@ class SchedulerDllmMixin:
 
                 req.fill_ids[-new_tokens:] = next_token_ids[:]
                 self.num_generated_tokens += new_tokens
+                req.record_dllm_block_emit_time(block_emit_time)
 
                 req.output_ids.extend(next_token_ids)
                 req.check_finished(new_accepted_len=new_tokens)
@@ -88,16 +111,275 @@ class SchedulerDllmMixin:
                 if req.finished():
                     release_kv_cache(req, self.tree_cache)
                     req.time_stats.set_completion_time()
+                    self._maybe_log_dllm_request_latency(req)
 
             self.stream_output(batch.reqs, batch.return_logprob)
             self.token_to_kv_pool_allocator.free_group_end()
 
         can_run_cuda_graph = getattr(result, "can_run_cuda_graph", False)
+        self._maybe_log_dllm_batch_metrics(batch, result)
         self.report_prefill_stats(
             prefill_stats=batch.prefill_stats,
             can_run_cuda_graph=can_run_cuda_graph,
             dp_cooperation_info=batch.dp_cooperation_info,
         )
+
+    def _maybe_log_dllm_request_latency(self: Scheduler, req: Req) -> None:
+        """Append per-request TTFB/TPOB metrics when configured."""
+        if req.dllm_latency_logged:
+            return
+
+        log_file = self.dllm_config.algorithm_config.get("request_latency_log_file")
+        if log_file is None:
+            log_file = self.dllm_config.algorithm_config.get("ttfb_tpob_log_file")
+        if log_file is None:
+            return
+
+        ttfb = req.get_dllm_ttfb()
+        tpob = req.get_dllm_tpob()
+        record = {
+            "rid": req.rid,
+            "input_len": len(req.origin_input_ids),
+            "output_len": len(req.output_ids),
+            "block_size": self.dllm_config.block_size,
+            "num_output_blocks": req.dllm_output_block_count,
+            "ttfb_s": ttfb,
+            "ttfb_ms": None if ttfb is None else ttfb * 1000,
+            # TPOB is the mean of adjacent output-block intervals.
+            "tpob_s": tpob,
+            "tpob_ms": None if tpob is None else tpob * 1000,
+            "tpob_count": req.dllm_tpob_count,
+        }
+        with open(log_file, "a") as f:
+            f.write(json.dumps(record) + "\n")
+        req.dllm_latency_logged = True
+
+    def _get_dllm_batch_metric_log_file(self: Scheduler) -> Optional[str]:
+        log_file = self.dllm_config.algorithm_config.get("batch_latency_log_file")
+        if log_file is None:
+            log_file = self.dllm_config.algorithm_config.get("phase_log_file")
+        return log_file
+
+    @staticmethod
+    def _get_dllm_batch_phase(reqs: List[Req]) -> str:
+        if any(req.is_dllm_prefill() for req in reqs):
+            return "prefill"
+        return "decode"
+
+    def _annotate_dllm_batch_metrics(
+        self: Scheduler,
+        batch: ScheduleBatch,
+        batch_phase: str,
+        schedule_start_time: float,
+    ) -> None:
+        if self.dllm_last_batch_phase == batch_phase:
+            self.dllm_phase_run_length += 1
+        else:
+            if self.dllm_last_batch_phase is not None:
+                self.dllm_phase_switch_count += 1
+            self.dllm_last_batch_phase = batch_phase
+            self.dllm_phase_run_length = 1
+
+        if batch_phase == "prefill":
+            self.dllm_prefill_batch_count += 1
+        else:
+            self.dllm_decode_batch_count += 1
+
+        batch.dllm_batch_seq = self.dllm_batch_seq
+        batch.dllm_batch_phase = batch_phase
+        batch.dllm_phase_run_length = self.dllm_phase_run_length
+        batch.dllm_phase_switch_count = self.dllm_phase_switch_count
+        batch.dllm_schedule_start_time = schedule_start_time
+        batch.dllm_forward_start_time = time.perf_counter()
+        if self._get_dllm_batch_metric_log_file() is not None:
+            self._annotate_dllm_per_req_metrics(batch)
+        self.dllm_batch_seq += 1
+
+    def _annotate_dllm_per_req_metrics(self: Scheduler, batch: ScheduleBatch) -> None:
+        """Snapshot request-level DLLM metadata before forward mutates inputs."""
+        mask_id = self.dllm_config.mask_id
+        input_ids = getattr(batch, "input_ids", None)
+        flat_input_ids = (
+            input_ids.detach().cpu().tolist() if input_ids is not None else []
+        )
+
+        rids = []
+        phases = []
+        exec_phases = []
+        effective_phases = []
+        has_mask = []
+        extend_input_lens = []
+        offset = 0
+
+        for req in batch.reqs:
+            rids.append(req.rid)
+            source_phase = getattr(req, "dllm_scheduled_source_phase", None)
+            exec_phase = getattr(req, "dllm_scheduled_exec_phase", None)
+            current_phase = getattr(req, "dllm_phase", None)
+            if source_phase is None:
+                source_phase = current_phase
+            if exec_phase is None:
+                exec_phase = current_phase
+            phases.append(source_phase.value if source_phase is not None else None)
+            exec_phases.append(exec_phase.value if exec_phase is not None else None)
+
+            extend_len = int(getattr(req, "extend_input_len", 0) or 0)
+            extend_input_lens.append(extend_len)
+            chunk = flat_input_ids[offset : offset + extend_len]
+            if len(chunk) < extend_len:
+                prefix_len = len(getattr(req, "prefix_indices", []))
+                chunk = req.fill_ids[prefix_len : prefix_len + extend_len]
+            req_has_mask = mask_id in chunk
+            has_mask.append(req_has_mask)
+            effective_phases.append("decode" if req_has_mask else "prefill")
+            offset += extend_len
+
+        batch.dllm_rids = rids
+        batch.dllm_per_req_phase = phases
+        batch.dllm_per_req_exec_phase = exec_phases
+        batch.dllm_per_req_effective_phase = effective_phases
+        batch.dllm_per_req_has_mask = has_mask
+        batch.dllm_per_req_extend_input_len = extend_input_lens
+
+    def _maybe_log_dllm_batch_metrics(
+        self: Scheduler,
+        batch: ScheduleBatch,
+        result: GenerationBatchResult,
+    ) -> None:
+        log_file = self._get_dllm_batch_metric_log_file()
+        if log_file is None:
+            return
+
+        end_time = time.perf_counter()
+        start_time = getattr(batch, "dllm_forward_start_time", end_time)
+        schedule_start_time = getattr(batch, "dllm_schedule_start_time", start_time)
+        forward_result_s = end_time - start_time
+        duration_s = end_time - schedule_start_time
+        schedule_prepare_s = start_time - schedule_start_time
+        phase = getattr(batch, "dllm_batch_phase", "unknown")
+        num_reqs = batch.batch_size()
+        num_output_blocks = 0
+        if result.next_token_ids:
+            num_output_blocks = sum(
+                1 for token_ids in result.next_token_ids if len(token_ids) > 0
+            )
+
+        per_req_phase = list(getattr(batch, "dllm_per_req_phase", []))
+        per_req_exec_phase = list(getattr(batch, "dllm_per_req_exec_phase", []))
+        per_req_effective_phase = list(
+            getattr(batch, "dllm_per_req_effective_phase", [])
+        )
+        per_req_has_mask = list(getattr(batch, "dllm_per_req_has_mask", []))
+        per_req_extend_input_len = list(
+            getattr(batch, "dllm_per_req_extend_input_len", [])
+        )
+        per_req_block_steps = getattr(result, "dllm_block_steps", None)
+        if per_req_block_steps is None:
+            per_req_block_steps = [None] * num_reqs
+        else:
+            per_req_block_steps = list(per_req_block_steps)
+        if not per_req_block_steps and num_reqs > 0:
+            per_req_block_steps = [0] * num_reqs
+        elif len(per_req_block_steps) < num_reqs:
+            per_req_block_steps.extend([None] * (num_reqs - len(per_req_block_steps)))
+        elif len(per_req_block_steps) > num_reqs:
+            per_req_block_steps = per_req_block_steps[:num_reqs]
+
+        num_initial_prefill_reqs = per_req_phase.count(
+            DllmReqPhase.INCOMING_PREFILL.value
+        )
+        num_staging_prefill_reqs = per_req_phase.count(
+            DllmReqPhase.STAGING_PREFILL.value
+        )
+        num_initial_decode_reqs = per_req_phase.count(DllmReqPhase.INCOMING_DECODE.value)
+        num_staging_decode_reqs = per_req_phase.count(DllmReqPhase.STAGING_DECODE.value)
+        num_masked_reqs = sum(1 for value in per_req_has_mask if value)
+        num_unmasked_reqs = sum(1 for value in per_req_has_mask if not value)
+        is_mixed_mask_batch = num_masked_reqs > 0 and num_unmasked_reqs > 0
+
+        if phase == "prefill":
+            self.dllm_prefill_batch_time_sum += duration_s
+            self.dllm_prefill_req_time_sum += duration_s * num_reqs
+            self.dllm_prefill_req_count += num_reqs
+        elif phase == "decode":
+            self.dllm_decode_batch_time_sum += duration_s
+            if num_output_blocks > 0:
+                self.dllm_decode_block_time_sum += duration_s * num_output_blocks
+                self.dllm_decode_block_count += num_output_blocks
+
+        avg_prefill_req_s = (
+            self.dllm_prefill_req_time_sum / self.dllm_prefill_req_count
+            if self.dllm_prefill_req_count > 0
+            else None
+        )
+        avg_decode_block_s = (
+            self.dllm_decode_block_time_sum / self.dllm_decode_block_count
+            if self.dllm_decode_block_count > 0
+            else None
+        )
+        avg_prefill_batch_s = (
+            self.dllm_prefill_batch_time_sum / self.dllm_prefill_batch_count
+            if self.dllm_prefill_batch_count > 0
+            else None
+        )
+        avg_decode_batch_s = (
+            self.dllm_decode_batch_time_sum / self.dllm_decode_batch_count
+            if self.dllm_decode_batch_count > 0
+            else None
+        )
+
+        record = {
+            "seq": getattr(batch, "dllm_batch_seq", None),
+            "phase": phase,
+            "phase_run_length": getattr(batch, "dllm_phase_run_length", None),
+            "phase_switch_count": getattr(batch, "dllm_phase_switch_count", None),
+            "rids": list(getattr(batch, "dllm_rids", [])),
+            "per_req_phase": per_req_phase,
+            "per_req_source_phase": per_req_phase,
+            "per_req_exec_phase": per_req_exec_phase,
+            "per_req_effective_phase": per_req_effective_phase,
+            "per_req_has_mask": per_req_has_mask,
+            "per_req_extend_input_len": per_req_extend_input_len,
+            "per_req_block_steps": per_req_block_steps,
+            "raw_forward_calls": getattr(result, "dllm_raw_forward_calls", None),
+            "num_reqs": num_reqs,
+            "num_output_blocks": num_output_blocks,
+            "num_initial_prefill_reqs": num_initial_prefill_reqs,
+            "num_staging_prefill_reqs": num_staging_prefill_reqs,
+            "num_initial_decode_reqs": num_initial_decode_reqs,
+            "num_staging_decode_reqs": num_staging_decode_reqs,
+            "num_masked_reqs": num_masked_reqs,
+            "num_unmasked_reqs": num_unmasked_reqs,
+            "is_mixed_mask_batch": is_mixed_mask_batch,
+            "duration_s": duration_s,
+            "duration_ms": duration_s * 1000,
+            "forward_result_s": forward_result_s,
+            "forward_result_ms": forward_result_s * 1000,
+            "schedule_prepare_s": schedule_prepare_s,
+            "schedule_prepare_ms": schedule_prepare_s * 1000,
+            "prefill_batch_count": self.dllm_prefill_batch_count,
+            "decode_batch_count": self.dllm_decode_batch_count,
+            "prefill_req_count": self.dllm_prefill_req_count,
+            "decode_block_count": self.dllm_decode_block_count,
+            "avg_prefill_req_s": avg_prefill_req_s,
+            "avg_prefill_req_ms": (
+                None if avg_prefill_req_s is None else avg_prefill_req_s * 1000
+            ),
+            "avg_prefill_batch_s": avg_prefill_batch_s,
+            "avg_prefill_batch_ms": (
+                None if avg_prefill_batch_s is None else avg_prefill_batch_s * 1000
+            ),
+            "avg_decode_block_s": avg_decode_block_s,
+            "avg_decode_block_ms": (
+                None if avg_decode_block_s is None else avg_decode_block_s * 1000
+            ),
+            "avg_decode_batch_s": avg_decode_batch_s,
+            "avg_decode_batch_ms": (
+                None if avg_decode_batch_s is None else avg_decode_batch_s * 1000
+            ),
+        }
+        with open(log_file, "a") as f:
+            f.write(json.dumps(record) + "\n")
 
     def _fetch_waiting_reqs(self: Scheduler):
         # Calculate how many requests can be added to DLLM manager
@@ -251,8 +533,11 @@ class SchedulerDllmMixin:
                 ):
                     break
 
-            # Prepare and add request
+            # Snapshot the incoming phase before init_next_round_input converts it
+            # into a staging phase for the actual executable block.
+            req.dllm_scheduled_source_phase = req.dllm_phase
             req.init_next_round_input(self.tree_cache)
+            req.dllm_scheduled_exec_phase = req.dllm_phase
             res = adder.add_one_req(
                 req,
                 has_chunked_req=True,
@@ -271,7 +556,9 @@ class SchedulerDllmMixin:
     ) -> AddReqResult:
         """Process staging DLLM requests with resource allocation."""
         for req in reqs:
+            req.dllm_scheduled_source_phase = req.dllm_phase
             res = adder.add_dllm_staging_req(req)
+            req.dllm_scheduled_exec_phase = req.dllm_phase
             if res == AddReqResult.NO_TOKEN:
                 return res
 

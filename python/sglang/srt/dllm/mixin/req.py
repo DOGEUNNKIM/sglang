@@ -21,6 +21,14 @@ class ReqDllmMixin:
         self.dllm_phase: Optional[DllmReqPhase] = None
         self.dllm_block_offset = 0
         self.dllm_config = dllm_config
+        self.dllm_first_block_time: Optional[float] = None
+        self.dllm_last_block_time: Optional[float] = None
+        self.dllm_tpob_sum = 0.0
+        self.dllm_tpob_count = 0
+        self.dllm_output_block_count = 0
+        self.dllm_latency_logged = False
+        self.dllm_scheduled_source_phase: Optional[DllmReqPhase] = None
+        self.dllm_scheduled_exec_phase: Optional[DllmReqPhase] = None
 
         if self.dllm_config is not None:
             if len(self.origin_input_ids) < self.dllm_config.block_size:
@@ -30,6 +38,33 @@ class ReqDllmMixin:
 
     def is_dllm(self: Req) -> bool:
         return self.dllm_config is not None
+
+    def record_dllm_block_emit_time(self: Req, ts: float) -> None:
+        if self.dllm_first_block_time is None:
+            self.dllm_first_block_time = ts
+        elif self.dllm_last_block_time is not None:
+            self.dllm_tpob_sum += ts - self.dllm_last_block_time
+            self.dllm_tpob_count += 1
+
+        self.dllm_last_block_time = ts
+        self.dllm_output_block_count += 1
+
+    def get_dllm_ttfb(self: Req) -> Optional[float]:
+        if self.dllm_first_block_time is None:
+            return None
+
+        start_time = getattr(self.time_stats, "wait_queue_entry_time", 0.0)
+        if start_time == 0.0:
+            start_time = getattr(self.time_stats, "scheduler_recv_time", 0.0)
+        if start_time == 0.0:
+            return None
+
+        return self.dllm_first_block_time - start_time
+
+    def get_dllm_tpob(self: Req) -> Optional[float]:
+        if self.dllm_tpob_count == 0:
+            return None
+        return self.dllm_tpob_sum / self.dllm_tpob_count
 
     def is_dllm_prefill(self: Req) -> bool:
         return self.dllm_phase in [

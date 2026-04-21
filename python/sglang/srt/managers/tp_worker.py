@@ -431,13 +431,19 @@ class TpModelWorker(BaseTpWorker):
     def _forward_batch_generation_dllm(
         self, forward_batch: ForwardBatch
     ) -> GenerationBatchResult:
-        logits_output, next_token_ids, can_run_cuda_graph = self.dllm_algorithm.run(
-            self.model_runner, forward_batch
-        )
+        run_result = self.dllm_algorithm.run(self.model_runner, forward_batch)
+        logits_output, next_token_ids, can_run_cuda_graph = run_result[:3]
+        dllm_raw_forward_calls = None
+        dllm_block_steps = None
+        if len(run_result) >= 5:
+            dllm_raw_forward_calls = run_result[3]
+            dllm_block_steps = run_result[4]
         return GenerationBatchResult(
             logits_output=logits_output,
             next_token_ids=next_token_ids,
             can_run_cuda_graph=can_run_cuda_graph,
+            dllm_raw_forward_calls=dllm_raw_forward_calls,
+            dllm_block_steps=dllm_block_steps,
         )
 
     def forward_batch_generation(

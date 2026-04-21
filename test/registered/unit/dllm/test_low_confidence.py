@@ -54,11 +54,19 @@ class TestLowConfidenceForwardCounting(unittest.TestCase):
             ]
             runner = FakeModelRunner(logits_per_call)
 
-            _, next_token_ids, can_run_cuda_graph = algo.run(runner, forward_batch)
+            (
+                _,
+                next_token_ids,
+                can_run_cuda_graph,
+                raw_forward_calls,
+                block_steps,
+            ) = algo.run(runner, forward_batch)
 
         self.assertFalse(can_run_cuda_graph)
         self.assertEqual(runner.call_count, 3)
         self.assertEqual(next_token_ids[0].tolist(), [1, 2])
+        self.assertEqual(raw_forward_calls, 3)
+        self.assertEqual(block_steps, [2])
 
         with open(tmp.name) as f:
             record = json.loads(f.read().strip())
@@ -88,11 +96,19 @@ class TestLowConfidenceForwardCounting(unittest.TestCase):
             )
             runner = FakeModelRunner([torch.tensor([[0.0, 1.0], [1.0, 0.0]])])
 
-            _, next_token_ids, can_run_cuda_graph = algo.run(runner, forward_batch)
+            (
+                _,
+                next_token_ids,
+                can_run_cuda_graph,
+                raw_forward_calls,
+                block_steps,
+            ) = algo.run(runner, forward_batch)
 
         self.assertFalse(can_run_cuda_graph)
         self.assertEqual(runner.call_count, 1)
         self.assertEqual(next_token_ids, [])
+        self.assertEqual(raw_forward_calls, 1)
+        self.assertEqual(block_steps, [])
 
         with open(tmp.name) as f:
             record = json.loads(f.read().strip())
