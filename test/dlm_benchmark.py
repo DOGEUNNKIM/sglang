@@ -669,6 +669,10 @@ def summarize_latency_metrics(
 
     ttfb_ms = _values(request_records, "ttfb_ms")
     tpob_ms = _values(request_records, "tpob_ms")
+    prefill_queue_wait_ms = _values(request_records, "prefill_queue_wait_ms")
+    prefill_batch_to_done_ms = _values(
+        request_records, "prefill_batch_to_done_ms"
+    )
     avg_prefill_req_ms = _weighted_batch_mean(
         batch_records, "prefill", "duration_ms", "num_reqs"
     )
@@ -689,6 +693,8 @@ def summarize_latency_metrics(
 
     return {
         "n_request_records": len(request_records),
+        "n_prefill_queue_wait_records": len(prefill_queue_wait_ms),
+        "n_prefill_batch_to_done_records": len(prefill_batch_to_done_ms),
         "mean_ttfb_ms": float(np.mean(ttfb_ms)) if ttfb_ms else None,
         "p50_ttfb_ms": _percentile(ttfb_ms, 50),
         "p95_ttfb_ms": _percentile(ttfb_ms, 95),
@@ -697,6 +703,26 @@ def summarize_latency_metrics(
         "p50_tpob_ms": _percentile(tpob_ms, 50),
         "p95_tpob_ms": _percentile(tpob_ms, 95),
         "p99_tpob_ms": _percentile(tpob_ms, 99),
+        "mean_prefill_queue_wait_ms": (
+            float(np.mean(prefill_queue_wait_ms)) if prefill_queue_wait_ms else None
+        ),
+        "p50_prefill_queue_wait_ms": _percentile(prefill_queue_wait_ms, 50),
+        "p95_prefill_queue_wait_ms": _percentile(prefill_queue_wait_ms, 95),
+        "p99_prefill_queue_wait_ms": _percentile(prefill_queue_wait_ms, 99),
+        "mean_prefill_batch_to_done_ms": (
+            float(np.mean(prefill_batch_to_done_ms))
+            if prefill_batch_to_done_ms
+            else None
+        ),
+        "p50_prefill_batch_to_done_ms": _percentile(
+            prefill_batch_to_done_ms, 50
+        ),
+        "p95_prefill_batch_to_done_ms": _percentile(
+            prefill_batch_to_done_ms, 95
+        ),
+        "p99_prefill_batch_to_done_ms": _percentile(
+            prefill_batch_to_done_ms, 99
+        ),
         "n_batch_records": len(batch_records),
         "avg_prefill_req_ms": avg_prefill_req_ms,
         "avg_decode_block_ms": avg_decode_block_ms,
@@ -738,11 +764,18 @@ def plot_latency_metrics(
     colors = {"gsm8k": "#4C72B0", "humaneval": "#DD8452", "math": "#55A868"}
     model_tag = model_name.replace("/", "_")
 
-    # ── Request-level TTFB/TPOB box plots ─────────────────────────────
-    fig, axes = plt.subplots(1, 2, figsize=(max(8, 2.8 * len(tasks) + 3), 4))
+    # ── Request-level latency box plots ───────────────────────────────
+    fig, axes_grid = plt.subplots(
+        2,
+        2,
+        figsize=(max(9, 2.8 * len(tasks) + 4), 7),
+    )
+    axes = axes_grid.ravel()
     for ax, key, title in [
         (axes[0], "ttfb_ms", "TTFB per request"),
         (axes[1], "tpob_ms", "Mean TPOB per request"),
+        (axes[2], "prefill_queue_wait_ms", "Request to prefill batch"),
+        (axes[3], "prefill_batch_to_done_ms", "Prefill batch to done"),
     ]:
         plot_tasks = [
             task for task in tasks if _values(latency_data[task]["request"], key)
@@ -1132,6 +1165,12 @@ def main():
                     f"mean_tpob_ms={latency_summary.get('mean_tpob_ms')}  "
                     f"p95_tpob_ms={latency_summary.get('p95_tpob_ms')}  "
                     f"p99_tpob_ms={latency_summary.get('p99_tpob_ms')}  "
+                    f"prefill_queue_wait_ms={latency_summary.get('mean_prefill_queue_wait_ms')}  "
+                    f"p95_prefill_queue_wait_ms={latency_summary.get('p95_prefill_queue_wait_ms')}  "
+                    f"p99_prefill_queue_wait_ms={latency_summary.get('p99_prefill_queue_wait_ms')}  "
+                    f"prefill_batch_to_done_ms={latency_summary.get('mean_prefill_batch_to_done_ms')}  "
+                    f"p95_prefill_batch_to_done_ms={latency_summary.get('p95_prefill_batch_to_done_ms')}  "
+                    f"p99_prefill_batch_to_done_ms={latency_summary.get('p99_prefill_batch_to_done_ms')}  "
                     f"avg_prefill_req_ms={latency_summary.get('avg_prefill_req_ms')}  "
                     f"avg_decode_block_ms={latency_summary.get('avg_decode_block_ms')}  "
                     f"initial_prefill_req_ms={latency_summary.get('avg_initial_prefill_req_ms')}  "

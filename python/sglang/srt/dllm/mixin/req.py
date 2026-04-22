@@ -23,6 +23,9 @@ class ReqDllmMixin:
         self.dllm_config = dllm_config
         self.dllm_first_block_time: Optional[float] = None
         self.dllm_last_block_time: Optional[float] = None
+        self.dllm_first_prefill_batch_time: Optional[float] = None
+        self.dllm_last_prefill_batch_end_time: Optional[float] = None
+        self.dllm_prefill_done_time: Optional[float] = None
         self.dllm_tpob_sum = 0.0
         self.dllm_tpob_count = 0
         self.dllm_output_block_count = 0
@@ -58,14 +61,20 @@ class ReqDllmMixin:
         self.dllm_last_block_time = ts
         self.dllm_output_block_count += 1
 
-    def get_dllm_ttfb(self: Req) -> Optional[float]:
-        if self.dllm_first_block_time is None:
-            return None
-
+    def get_dllm_request_start_time(self: Req) -> Optional[float]:
         start_time = getattr(self.time_stats, "wait_queue_entry_time", 0.0)
         if start_time == 0.0:
             start_time = getattr(self.time_stats, "scheduler_recv_time", 0.0)
         if start_time == 0.0:
+            return None
+        return start_time
+
+    def get_dllm_ttfb(self: Req) -> Optional[float]:
+        if self.dllm_first_block_time is None:
+            return None
+
+        start_time = self.get_dllm_request_start_time()
+        if start_time is None:
             return None
 
         return self.dllm_first_block_time - start_time
@@ -74,6 +83,38 @@ class ReqDllmMixin:
         if self.dllm_tpob_count == 0:
             return None
         return self.dllm_tpob_sum / self.dllm_tpob_count
+
+    def record_dllm_prefill_batch_assignment(self: Req, ts: float) -> None:
+        if self.dllm_first_prefill_batch_time is None:
+            self.dllm_first_prefill_batch_time = ts
+
+    def record_dllm_prefill_batch_end(self: Req, ts: float) -> None:
+        self.dllm_last_prefill_batch_end_time = ts
+
+    def mark_dllm_prefill_done(self: Req, ts: Optional[float] = None) -> None:
+        if self.dllm_prefill_done_time is not None:
+            return
+        if self.dllm_first_prefill_batch_time is None:
+            return
+        if ts is None:
+            ts = self.dllm_last_prefill_batch_end_time
+        if ts is None:
+            return
+        self.dllm_prefill_done_time = ts
+
+    def get_dllm_prefill_queue_wait(self: Req) -> Optional[float]:
+        start_time = self.get_dllm_request_start_time()
+        if start_time is None or self.dllm_first_prefill_batch_time is None:
+            return None
+        return self.dllm_first_prefill_batch_time - start_time
+
+    def get_dllm_prefill_batch_to_done(self: Req) -> Optional[float]:
+        if (
+            self.dllm_first_prefill_batch_time is None
+            or self.dllm_prefill_done_time is None
+        ):
+            return None
+        return self.dllm_prefill_done_time - self.dllm_first_prefill_batch_time
 
     def is_dllm_prefill(self: Req) -> bool:
         return self.dllm_phase in [

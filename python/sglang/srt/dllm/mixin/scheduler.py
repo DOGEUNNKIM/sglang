@@ -97,6 +97,7 @@ class SchedulerDllmMixin:
         block_steps = getattr(result, "dllm_block_steps", None) or []
         next_token_ids_list = result.next_token_ids or []
         block_emit_time = time.perf_counter()
+        self._record_dllm_prefill_batch_end(batch, block_emit_time)
         has_output = False
         has_finished = False
 
@@ -172,6 +173,9 @@ class SchedulerDllmMixin:
 
         ttfb = req.get_dllm_ttfb()
         tpob = req.get_dllm_tpob()
+        req.mark_dllm_prefill_done()
+        prefill_queue_wait = req.get_dllm_prefill_queue_wait()
+        prefill_batch_to_done = req.get_dllm_prefill_batch_to_done()
         record = {
             "rid": req.rid,
             "input_len": len(req.origin_input_ids),
@@ -184,6 +188,18 @@ class SchedulerDllmMixin:
             "tpob_s": tpob,
             "tpob_ms": None if tpob is None else tpob * 1000,
             "tpob_count": req.dllm_tpob_count,
+            # Request arrival -> first prefill batch assignment.
+            "prefill_queue_wait_s": prefill_queue_wait,
+            "prefill_queue_wait_ms": (
+                None if prefill_queue_wait is None else prefill_queue_wait * 1000
+            ),
+            # First prefill batch assignment -> last prefill forward completion.
+            "prefill_batch_to_done_s": prefill_batch_to_done,
+            "prefill_batch_to_done_ms": (
+                None
+                if prefill_batch_to_done is None
+                else prefill_batch_to_done * 1000
+            ),
         }
         with open(log_file, "a") as f:
             f.write(json.dumps(record) + "\n")
@@ -235,9 +251,22 @@ class SchedulerDllmMixin:
         self._annotate_dllm_per_req_metrics(batch)
         self.dllm_batch_seq += 1
 
+    def _record_dllm_prefill_batch_end(
+        self: Scheduler,
+        batch: ScheduleBatch,
+        end_time: float,
+    ) -> None:
+        req_modes = list(getattr(batch, "dllm_req_modes", []))
+        for idx, req in enumerate(batch.reqs):
+            if idx < len(req_modes) and req_modes[idx] == "prefill":
+                req.record_dllm_prefill_batch_end(end_time)
+
     def _annotate_dllm_per_req_metrics(self: Scheduler, batch: ScheduleBatch) -> None:
         """Snapshot request-level DLLM metadata before forward mutates inputs."""
         mask_id = self.dllm_config.mask_id
+        schedule_start_time = getattr(batch, "dllm_schedule_start_time", None)
+        if schedule_start_time is None:
+            schedule_start_time = time.perf_counter()
 
         rids = []
         phases = []
@@ -277,6 +306,11 @@ class SchedulerDllmMixin:
             else:
                 req_mode = "prefill"
             req_modes.append(req_mode)
+
+            if req_mode == "prefill":
+                req.record_dllm_prefill_batch_assignment(schedule_start_time)
+            else:
+                req.mark_dllm_prefill_done()
 
             if req_mode in ("unmask", "kv_save"):
                 if req.dllm_active_ids is None:
@@ -468,8 +502,10 @@ class SchedulerDllmMixin:
 
     def _fetch_waiting_reqs(self: Scheduler):
         # Calculate how many requests can be added to DLLM manager
-        max_dllm_capacity = self.dllm_config.max_running_requests - len(
-            self.dllm_manager.waiting_queue
+        max_dllm_capacity = max(
+            0,
+            self.dllm_manager.max_admission_reqs
+            - len(self.dllm_manager.waiting_queue),
         )
         num_requests_to_add = min(max_dllm_capacity, len(self.waiting_queue))
 
@@ -477,6 +513,39 @@ class SchedulerDllmMixin:
             requests_to_add = self.waiting_queue[:num_requests_to_add]
             self.dllm_manager.add_waiting_reqs(requests_to_add)
             self.waiting_queue = self.waiting_queue[num_requests_to_add:]
+
+    def _get_dllm_execution_capacity(self: Scheduler, running_bs: int) -> int:
+        return max(
+            0,
+            min(
+                self.dllm_config.max_running_requests,
+                self.get_num_allocatable_reqs(running_bs),
+            ),
+        )
+
+    def _get_dllm_remaining_req_slots_for_batch(
+        self: Scheduler, adder: PrefillAdder
+    ) -> int:
+        scheduled_new_reqs = sum(
+            1 for req in adder.can_run_list if req.req_pool_idx is None
+        )
+        return max(0, self.req_to_token_pool.available_size() - scheduled_new_reqs)
+
+    def _limit_dllm_candidates_by_req_slots(
+        self: Scheduler,
+        reqs: List[Req],
+        adder: PrefillAdder,
+    ) -> List[Req]:
+        """Keep reusable reqs and cap new incoming reqs by free req-pool slots."""
+        remaining_slots = self._get_dllm_remaining_req_slots_for_batch(adder)
+        limited_reqs = []
+        for req in reqs:
+            if req.req_pool_idx is not None:
+                limited_reqs.append(req)
+            elif remaining_slots > 0:
+                limited_reqs.append(req)
+                remaining_slots -= 1
+        return limited_reqs
 
     def _should_skip_prefill(self: Scheduler) -> bool:
         """Check if DLLM prefill should be skipped."""
@@ -513,33 +582,75 @@ class SchedulerDllmMixin:
         )
 
     def _process_dllm_batches(self: Scheduler, adder: PrefillAdder) -> ForwardMode:
-        """Process DLLM batches, filling decode into remaining prefill budget."""
+        """Process DLLM batches with prefill cap and decode round-robin."""
         forward_mode = ForwardMode.DLLM_EXTEND
+        running_bs = len(self.running_batch.reqs)
+        execution_capacity = self._get_dllm_execution_capacity(running_bs)
+        prefill_cap = (
+            max(1, execution_capacity // 2) if execution_capacity > 0 else 0
+        )
 
         prefill_reqs = self.dllm_manager.get_prefill_requests()
         prefill_result = AddReqResult.CONTINUE
-        if prefill_reqs:
+        if prefill_reqs and prefill_cap > 0:
+            prefill_candidates = self._limit_dllm_candidates_by_req_slots(
+                prefill_reqs[:prefill_cap], adder
+            )
             prefill_result = self._process_batch_by_phase(
                 adder,
-                prefill_reqs,
+                prefill_candidates,
                 DllmReqPhase.STAGING_PREFILL,
                 DllmReqPhase.INCOMING_PREFILL,
             )
 
         if prefill_result == AddReqResult.CONTINUE:
             scheduled_reqs = {req.rid for req in adder.can_run_list}
+            remaining_slots = max(0, execution_capacity - len(adder.can_run_list))
             decode_reqs = [
                 req
-                for req in self.dllm_manager.get_decode_requests()
+                for req in self.dllm_manager.get_decode_requests_round_robin()
                 if req.rid not in scheduled_reqs
             ]
-            if decode_reqs:
-                self._process_batch_by_phase(
+            decode_reqs = self._limit_dllm_candidates_by_req_slots(
+                decode_reqs, adder
+            )
+            decode_result = AddReqResult.CONTINUE
+            if decode_reqs and remaining_slots > 0:
+                decode_candidates = decode_reqs[:remaining_slots]
+                decode_candidate_rids = {
+                    candidate.rid for candidate in decode_candidates
+                }
+                before_decode_rids = {req.rid for req in adder.can_run_list}
+                decode_result = self._process_batch_by_phase(
                     adder,
-                    decode_reqs,
+                    decode_candidates,
                     DllmReqPhase.STAGING_DECODE,
                     DllmReqPhase.INCOMING_DECODE,
                 )
+                scheduled_decode_count = sum(
+                    1
+                    for req in adder.can_run_list
+                    if req.rid not in before_decode_rids
+                    and req.rid in decode_candidate_rids
+                )
+                self.dllm_manager.advance_decode_round_robin(scheduled_decode_count)
+
+            if decode_result == AddReqResult.CONTINUE:
+                scheduled_reqs = {req.rid for req in adder.can_run_list}
+                remaining_slots = max(0, execution_capacity - len(adder.can_run_list))
+                extra_prefill_reqs = [
+                    req for req in prefill_reqs if req.rid not in scheduled_reqs
+                ]
+                extra_prefill_reqs = self._limit_dllm_candidates_by_req_slots(
+                    extra_prefill_reqs, adder
+                )
+                if extra_prefill_reqs and remaining_slots > 0:
+                    self._process_batch_by_phase(
+                        adder,
+                        extra_prefill_reqs[:remaining_slots],
+                        DllmReqPhase.STAGING_PREFILL,
+                        DllmReqPhase.INCOMING_PREFILL,
+                    )
 
         return forward_mode
 
@@ -652,9 +763,18 @@ class SchedulerDllmMixin:
         """Process incoming DLLM requests with resource allocation and preemption."""
         res = AddReqResult.CONTINUE
         for req in reqs:
+            if (
+                req.req_pool_idx is None
+                and self._get_dllm_remaining_req_slots_for_batch(adder) <= 0
+            ):
+                self.running_batch.batch_is_full = True
+                return AddReqResult.NO_TOKEN
+
             # Check if batch is full
             running_bs = len(self.running_batch.reqs)
-            if len(adder.can_run_list) >= self.get_num_allocatable_reqs(running_bs):
+            if len(adder.can_run_list) >= self._get_dllm_execution_capacity(
+                running_bs
+            ):
                 self.running_batch.batch_is_full = True
 
             # Try preemption if batch is full
@@ -688,6 +808,20 @@ class SchedulerDllmMixin:
     ) -> AddReqResult:
         """Process staging DLLM requests with resource allocation."""
         for req in reqs:
+            if (
+                req.req_pool_idx is None
+                and self._get_dllm_remaining_req_slots_for_batch(adder) <= 0
+            ):
+                self.running_batch.batch_is_full = True
+                return AddReqResult.NO_TOKEN
+
+            running_bs = len(self.running_batch.reqs)
+            if len(adder.can_run_list) >= self._get_dllm_execution_capacity(
+                running_bs
+            ):
+                self.running_batch.batch_is_full = True
+                return AddReqResult.NO_TOKEN
+
             req.dllm_scheduled_source_phase = req.dllm_phase
             self._restore_dllm_active_prefix_indices(req)
             res = adder.add_dllm_staging_req(req)
@@ -712,6 +846,8 @@ class DllmManager:
         self.max_running_reqs = (
             dllm_config.max_running_requests if dllm_config is not None else 1
         )
+        self.max_admission_reqs = self.max_running_reqs * 2
+        self.decode_rr_cursor = 0
         self.waiting_queue: List[Req] = []
         self.staging_queue: List[Req] = []
 
@@ -722,6 +858,27 @@ class DllmManager:
     def get_decode_requests(self) -> List[Req]:
         """Get all decode requests from waiting queue."""
         return [req for req in self.waiting_queue if not req.is_dllm_prefill()]
+
+    def get_decode_requests_round_robin(self) -> List[Req]:
+        """Get decode requests rotated by the round-robin cursor."""
+        decode_reqs = self.get_decode_requests()
+        if not decode_reqs:
+            self.decode_rr_cursor = 0
+            return []
+
+        cursor = self.decode_rr_cursor % len(decode_reqs)
+        return decode_reqs[cursor:] + decode_reqs[:cursor]
+
+    def advance_decode_round_robin(self, scheduled_count: int) -> None:
+        """Advance the decode round-robin cursor by scheduled decode requests."""
+        decode_reqs = self.get_decode_requests()
+        if not decode_reqs:
+            self.decode_rr_cursor = 0
+            return
+        if scheduled_count > 0:
+            self.decode_rr_cursor = (
+                self.decode_rr_cursor + scheduled_count
+            ) % len(decode_reqs)
 
     def add_waiting_reqs(self, reqs: Union[Req, List[Req]]) -> None:
         """Add requests to waiting queue with redundancy check."""
@@ -764,6 +921,11 @@ class DllmManager:
         """Remove finished requests from both queues."""
         self.waiting_queue = [req for req in self.waiting_queue if not req.finished()]
         self.staging_queue = [req for req in self.staging_queue if not req.finished()]
+        decode_count = len(self.get_decode_requests())
+        if decode_count == 0:
+            self.decode_rr_cursor = 0
+        else:
+            self.decode_rr_cursor %= decode_count
 
     def init_next_round(self) -> None:
         """Initialize staging requests for next round and clear staging queue."""
