@@ -27,6 +27,7 @@ import random
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -294,11 +295,38 @@ def _make_sampler(task: str, base_url: str, model: str):
     return ChatCompletionSampler(**kw)
 
 
+class RateLimitedSampler:
+    """Throttle request start times across all worker threads."""
+
+    def __init__(self, sampler, request_rate: float):
+        self.sampler = sampler
+        self.interval_s = 1.0 / request_rate
+        self.lock = threading.Lock()
+        self.next_start_time = time.perf_counter()
+
+    def __getattr__(self, name):
+        return getattr(self.sampler, name)
+
+    def __call__(self, *args, **kwargs):
+        with self.lock:
+            now = time.perf_counter()
+            start_time = max(now, self.next_start_time)
+            self.next_start_time = start_time + self.interval_s
+
+        delay = start_time - now
+        if delay > 0:
+            time.sleep(delay)
+        return self.sampler(*args, **kwargs)
+
+
 def run_task(task: str, base_url: str, model: str,
              num_examples: Optional[int], num_threads: int,
              gsm8k_data_path: Optional[str] = None,
-             math_data_path: Optional[str] = None) -> Dict:
+             math_data_path: Optional[str] = None,
+             request_rate: Optional[float] = None) -> Dict:
     sampler = _make_sampler(task, base_url, model)
+    if request_rate is not None:
+        sampler = RateLimitedSampler(sampler, request_rate)
 
     if task == "gsm8k":
         from sglang.test.simple_eval_gsm8k import GSM8KEval
@@ -328,6 +356,7 @@ def run_task(task: str, base_url: str, model: str,
     return {
         "score": result.score,
         "latency_s": round(latency, 2),
+        "request_rate": request_rate,
         "output_throughput_tok_s": round(total_tokens / latency if latency > 0 else 0, 2),
         "total_completion_tokens": total_tokens,
         **(result.metrics or {}),
@@ -552,6 +581,14 @@ def _values(records: List[Dict[str, Any]], key: str) -> List[float]:
     ]
 
 
+def _percentile(values: List[float], q: float) -> Optional[float]:
+    if not values:
+        return None
+    import numpy as np
+
+    return float(np.percentile(values, q))
+
+
 def _weighted_batch_mean(
     records: List[Dict[str, Any]],
     phase: str,
@@ -653,7 +690,13 @@ def summarize_latency_metrics(
     return {
         "n_request_records": len(request_records),
         "mean_ttfb_ms": float(np.mean(ttfb_ms)) if ttfb_ms else None,
+        "p50_ttfb_ms": _percentile(ttfb_ms, 50),
+        "p95_ttfb_ms": _percentile(ttfb_ms, 95),
+        "p99_ttfb_ms": _percentile(ttfb_ms, 99),
         "mean_tpob_ms": float(np.mean(tpob_ms)) if tpob_ms else None,
+        "p50_tpob_ms": _percentile(tpob_ms, 50),
+        "p95_tpob_ms": _percentile(tpob_ms, 95),
+        "p99_tpob_ms": _percentile(tpob_ms, 99),
         "n_batch_records": len(batch_records),
         "avg_prefill_req_ms": avg_prefill_req_ms,
         "avg_decode_block_ms": avg_decode_block_ms,
@@ -952,6 +995,8 @@ def main():
                         default=["gsm8k", "humaneval", "math"])
     parser.add_argument("--num-examples", type=int, default=None)
     parser.add_argument("--num-threads", type=int, default=64)
+    parser.add_argument("--request-rate", type=float, default=None,
+                        help="전체 request 시작 rate(req/s). 미지정 시 기존 closed-loop 방식")
     parser.add_argument("--gsm8k-data-path", type=str, default=None)
     parser.add_argument("--math-data-path", type=str, default=None)
 
@@ -969,6 +1014,8 @@ def main():
         parser.error("--base-url 또는 --model-path 중 하나 필요")
     if args.base_url and args.model is None:
         parser.error("--base-url 사용 시 --model 필요")
+    if args.request_rate is not None and args.request_rate <= 0:
+        parser.error("--request-rate는 양수여야 합니다")
 
     if args.base_url and args.log:
         print(
@@ -1021,6 +1068,7 @@ def main():
                 num_examples=args.num_examples, num_threads=args.num_threads,
                 gsm8k_data_path=args.gsm8k_data_path,
                 math_data_path=args.math_data_path,
+                request_rate=args.request_rate,
             )
             all_results[task] = metrics
 
@@ -1079,7 +1127,11 @@ def main():
                 print(
                     f"[{task}] latency stats: "
                     f"mean_ttfb_ms={latency_summary.get('mean_ttfb_ms')}  "
+                    f"p95_ttfb_ms={latency_summary.get('p95_ttfb_ms')}  "
+                    f"p99_ttfb_ms={latency_summary.get('p99_ttfb_ms')}  "
                     f"mean_tpob_ms={latency_summary.get('mean_tpob_ms')}  "
+                    f"p95_tpob_ms={latency_summary.get('p95_tpob_ms')}  "
+                    f"p99_tpob_ms={latency_summary.get('p99_tpob_ms')}  "
                     f"avg_prefill_req_ms={latency_summary.get('avg_prefill_req_ms')}  "
                     f"avg_decode_block_ms={latency_summary.get('avg_decode_block_ms')}  "
                     f"initial_prefill_req_ms={latency_summary.get('avg_initial_prefill_req_ms')}  "
