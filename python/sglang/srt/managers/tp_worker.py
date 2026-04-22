@@ -435,15 +435,28 @@ class TpModelWorker(BaseTpWorker):
         logits_output, next_token_ids, can_run_cuda_graph = run_result[:3]
         dllm_raw_forward_calls = None
         dllm_block_steps = None
+        dllm_req_modes = None
+        dllm_updated_ids = None
+        dllm_pending_kv_save = None
+        dllm_kv_saved = None
         if len(run_result) >= 5:
             dllm_raw_forward_calls = run_result[3]
             dllm_block_steps = run_result[4]
+        if len(run_result) >= 9:
+            dllm_updated_ids = run_result[5]
+            dllm_pending_kv_save = run_result[6]
+            dllm_kv_saved = run_result[7]
+            dllm_req_modes = run_result[8]
         return GenerationBatchResult(
             logits_output=logits_output,
             next_token_ids=next_token_ids,
             can_run_cuda_graph=can_run_cuda_graph,
             dllm_raw_forward_calls=dllm_raw_forward_calls,
             dllm_block_steps=dllm_block_steps,
+            dllm_req_modes=dllm_req_modes,
+            dllm_updated_ids=dllm_updated_ids,
+            dllm_pending_kv_save=dllm_pending_kv_save,
+            dllm_kv_saved=dllm_kv_saved,
         )
 
     def forward_batch_generation(

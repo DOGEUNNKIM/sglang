@@ -29,6 +29,15 @@ class ReqDllmMixin:
         self.dllm_latency_logged = False
         self.dllm_scheduled_source_phase: Optional[DllmReqPhase] = None
         self.dllm_scheduled_exec_phase: Optional[DllmReqPhase] = None
+        self.dllm_active_prefix_ids: Optional[list[int]] = None
+        self.dllm_active_ids: Optional[list[int]] = None
+        self.dllm_active_cache_locs = None
+        self.dllm_active_prefix_len: Optional[int] = None
+        self.dllm_active_seq_len: Optional[int] = None
+        self.dllm_active_block_offset: Optional[int] = None
+        self.dllm_active_start = 0
+        self.dllm_active_block_steps = 0
+        self.dllm_pending_kv_save = False
 
         if self.dllm_config is not None:
             if len(self.origin_input_ids) < self.dllm_config.block_size:
@@ -72,7 +81,25 @@ class ReqDllmMixin:
             DllmReqPhase.INCOMING_PREFILL,
         ]
 
+    def has_dllm_active_block(self: Req) -> bool:
+        return self.dllm_active_ids is not None
+
+    def clear_dllm_active_block(self: Req) -> None:
+        self.dllm_active_prefix_ids = None
+        self.dllm_active_ids = None
+        self.dllm_active_cache_locs = None
+        self.dllm_active_prefix_len = None
+        self.dllm_active_seq_len = None
+        self.dllm_active_block_offset = None
+        self.dllm_active_start = 0
+        self.dllm_active_block_steps = 0
+        self.dllm_pending_kv_save = False
+
     def determine_dllm_phase(self: Req):
+        if self.has_dllm_active_block():
+            self.dllm_phase = DllmReqPhase.STAGING_DECODE
+            return
+
         prefix_length = len(self.prefix_indices)
         min_required_length = prefix_length + self.dllm_config.block_size
 
@@ -89,6 +116,13 @@ class ReqDllmMixin:
             self.dllm_phase = DllmReqPhase.STAGING_DECODE
 
     def _init_fill_ids_for_dllm(self: Req):
+        if self.has_dllm_active_block():
+            prefix_ids = self.dllm_active_prefix_ids or []
+            self.fill_ids = prefix_ids + self.dllm_active_ids
+            if self.dllm_active_block_offset is not None:
+                self.dllm_block_offset = self.dllm_active_block_offset
+            return
+
         self.dllm_block_offset = (
             0
             if not self.fill_ids

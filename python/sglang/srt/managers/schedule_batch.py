@@ -1446,6 +1446,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
     # Diffusion LLM
     dllm_config: Optional[DllmConfig] = None
+    dllm_req_modes: Optional[List[str]] = None
+    dllm_active_starts: Optional[List[int]] = None
+    dllm_active_block_steps: Optional[List[int]] = None
 
     # Metrics
     dp_cooperation_info: Optional[DPCooperationInfo] = None
@@ -2470,6 +2473,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             return_pooled_hidden_states=self.return_pooled_hidden_states,
             dllm_block_offsets=[req.dllm_block_offset for req in self.reqs],
             dllm_config=self.dllm_config,
+            dllm_req_modes=self.dllm_req_modes,
+            dllm_active_starts=self.dllm_active_starts,
+            dllm_active_block_steps=self.dllm_active_block_steps,
             reqs=self.reqs,
             has_grammar=self.has_grammar,
             mamba_track_indices=self.mamba_track_indices,
@@ -2670,6 +2676,9 @@ class ModelWorkerBatch:
     # Diffusion LLM
     dllm_block_offsets: Optional[List[int]] = None
     dllm_config: Optional[DllmConfig] = None
+    dllm_req_modes: Optional[List[str]] = None
+    dllm_active_starts: Optional[List[int]] = None
+    dllm_active_block_steps: Optional[List[int]] = None
 
     # For constrained decoding
     # FIXME(lsyin): remove this after fully overlap grammar

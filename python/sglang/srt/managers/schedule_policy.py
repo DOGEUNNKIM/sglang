@@ -604,6 +604,12 @@ class PrefillAdder:
         if _rem_tokens <= 0:
             return AddReqResult.NO_TOKEN
 
+        if (
+            getattr(req, "has_dllm_active_block", lambda: False)()
+            and req.extend_input_len > _rem_tokens
+        ):
+            return AddReqResult.NO_TOKEN
+
         # Truncate input length to available tokens and update request metadata
         truncated = req.extend_input_len > _rem_tokens
         req.extend_input_len = min(req.extend_input_len, _rem_tokens)

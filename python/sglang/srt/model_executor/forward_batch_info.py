@@ -439,6 +439,11 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     # For dumper: request IDs for cross-step sequence tracking
     rids: Optional[List[str]] = None
 
+    # Diffusion LLM one-forward stepping metadata.
+    dllm_req_modes: Optional[List[str]] = None
+    dllm_active_starts: Optional[List[int]] = None
+    dllm_active_block_steps: Optional[List[int]] = None
+
     @classmethod
     def init_new(
         cls,
@@ -488,6 +493,9 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             return_hidden_states_before_norm=batch.return_hidden_states_before_norm,
             return_pooled_hidden_states=batch.return_pooled_hidden_states,
             rids=[req.rid for req in batch.reqs],
+            dllm_req_modes=batch.dllm_req_modes,
+            dllm_active_starts=batch.dllm_active_starts,
+            dllm_active_block_steps=batch.dllm_active_block_steps,
         )
         device = model_runner.device
 

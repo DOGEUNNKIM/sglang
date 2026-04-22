@@ -50,6 +50,10 @@ class GenerationBatchResult:
     expert_distribution_metrics: Optional[ExpertDistributionMetrics] = None
     dllm_raw_forward_calls: Optional[int] = None
     dllm_block_steps: Optional[List[int]] = None
+    dllm_req_modes: Optional[List[str]] = None
+    dllm_updated_ids: Optional[List[Optional[torch.Tensor]]] = None
+    dllm_pending_kv_save: Optional[List[bool]] = None
+    dllm_kv_saved: Optional[List[bool]] = None
 
     def copy_to_cpu(self, return_logprob: bool):
         """Copy tensors to CPU in overlap scheduling.
@@ -84,7 +88,18 @@ class GenerationBatchResult:
             self.logits_output.hidden_states = self.logits_output.hidden_states.to(
                 "cpu", non_blocking=True
             )
-        self.next_token_ids = self.next_token_ids.to("cpu", non_blocking=True)
+        if torch.is_tensor(self.next_token_ids):
+            self.next_token_ids = self.next_token_ids.to("cpu", non_blocking=True)
+        elif isinstance(self.next_token_ids, list):
+            self.next_token_ids = [
+                t.to("cpu", non_blocking=True) if torch.is_tensor(t) else t
+                for t in self.next_token_ids
+            ]
+        if isinstance(self.dllm_updated_ids, list):
+            self.dllm_updated_ids = [
+                t.to("cpu", non_blocking=True) if torch.is_tensor(t) else t
+                for t in self.dllm_updated_ids
+            ]
 
         if self.accept_lens is not None:
             self.accept_lens = self.accept_lens.to("cpu", non_blocking=True)

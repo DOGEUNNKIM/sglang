@@ -339,7 +339,16 @@ def alloc_for_extend(
     # free out-of-window swa tokens
     batch.maybe_evict_swa()
 
-    prefix_tensors = [r.prefix_indices for r in batch.reqs]
+    prefix_tensors = [
+        (
+            r.prefix_indices.to(
+                device=batch.device, dtype=torch.int64, non_blocking=True
+            )
+            if torch.is_tensor(r.prefix_indices)
+            else torch.tensor(r.prefix_indices, dtype=torch.int64, device=batch.device)
+        )
+        for r in batch.reqs
+    ]
 
     # Create tensors for allocation
     prefix_lens_cpu = torch.tensor(batch.prefix_lens, dtype=torch.int64)
@@ -354,24 +363,75 @@ def alloc_for_extend(
     req_pool_indices_cpu = torch.tensor(req_pool_indices, dtype=torch.int64)
     req_pool_indices_device = req_pool_indices_cpu.to(batch.device, non_blocking=True)
 
+    preallocated_locs = [
+        getattr(req, "dllm_active_cache_locs", None) for req in batch.reqs
+    ]
+    has_preallocated_locs = any(loc is not None for loc in preallocated_locs)
+    if has_preallocated_locs:
+        alloc_seq_lens = [
+            prefix_len if loc is not None else seq_len
+            for seq_len, prefix_len, loc in zip(
+                batch.seq_lens_cpu.tolist(), batch.prefix_lens, preallocated_locs
+            )
+        ]
+        alloc_extend_num_tokens = sum(
+            extend_len
+            for extend_len, loc in zip(batch.extend_lens, preallocated_locs)
+            if loc is None
+        )
+        alloc_seq_lens_cpu = torch.tensor(alloc_seq_lens, dtype=torch.int64)
+        alloc_seq_lens_device = alloc_seq_lens_cpu.to(batch.device, non_blocking=True)
+    else:
+        alloc_extend_num_tokens = batch.extend_num_tokens
+        alloc_seq_lens_cpu = batch.seq_lens_cpu
+        alloc_seq_lens_device = batch.seq_lens
+
     # Allocate KV cache (throws exception on failure)
-    if batch.tree_cache.page_size == 1:
-        out_cache_loc = alloc_token_slots(batch.tree_cache, batch.extend_num_tokens)
+    if alloc_extend_num_tokens == 0:
+        allocated_cache_loc = torch.empty(0, dtype=torch.int64, device=batch.device)
+    elif batch.tree_cache.page_size == 1:
+        allocated_cache_loc = alloc_token_slots(
+            batch.tree_cache, alloc_extend_num_tokens
+        )
     else:
         # Paged allocation - build last_loc
         last_loc = [
             (t[-1:] if len(t) > 0 else torch.tensor([-1], device=batch.device))
             for t in prefix_tensors
         ]
-        out_cache_loc = alloc_paged_token_slots_extend(
+        allocated_cache_loc = alloc_paged_token_slots_extend(
             tree_cache=batch.tree_cache,
             prefix_lens=prefix_lens_device,
             prefix_lens_cpu=prefix_lens_cpu,
-            seq_lens=batch.seq_lens,
-            seq_lens_cpu=batch.seq_lens_cpu,
+            seq_lens=alloc_seq_lens_device,
+            seq_lens_cpu=alloc_seq_lens_cpu,
             last_loc=torch.cat(last_loc),
-            extend_num_tokens=batch.extend_num_tokens,
+            extend_num_tokens=alloc_extend_num_tokens,
         )
+
+    if has_preallocated_locs:
+        out_cache_loc = torch.empty(
+            batch.extend_num_tokens, dtype=torch.int64, device=batch.device
+        )
+        src_offset = 0
+        dst_offset = 0
+        for extend_len, loc in zip(batch.extend_lens, preallocated_locs):
+            if loc is None:
+                out_cache_loc[dst_offset : dst_offset + extend_len] = (
+                    allocated_cache_loc[src_offset : src_offset + extend_len]
+                )
+                src_offset += extend_len
+            else:
+                loc = loc.to(device=batch.device, dtype=torch.int64)
+                if loc.numel() != extend_len:
+                    raise RuntimeError(
+                        "Preallocated KV loc length mismatch: "
+                        f"expected={extend_len}, got={loc.numel()}"
+                    )
+                out_cache_loc[dst_offset : dst_offset + extend_len] = loc
+            dst_offset += extend_len
+    else:
+        out_cache_loc = allocated_cache_loc
 
     # Write to req_to_token_pool
     write_cache_indices(

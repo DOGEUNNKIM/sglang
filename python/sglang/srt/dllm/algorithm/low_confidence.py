@@ -33,131 +33,129 @@ class LowConfidence(DllmAlgorithm):
         bool,
         int,
         List[int],
+        List[Union[torch.Tensor, None]],
+        List[bool],
+        List[bool],
+        List[str],
     ]:
         batch_size = forward_batch.batch_size
-        raw_forward_calls = 0
-        # Here, the forward_batch full logits contains all the blocks
-        # such as [dllm_block_size * batch_size, hidden_size]
-        start_list = []
-        mask_index = forward_batch.input_ids == self.mask_id
-
-        # Fast path: if there is no mask token, forward and save kv cache
-        if torch.sum(mask_index).item() == 0:
-            out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
-            raw_forward_calls += 1
-            logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
-
-            if self.step_log_file is not None:
-                with open(self.step_log_file, "a") as f:
-                    f.write(
-                        json.dumps(
-                            {
-                                "raw_forward_calls": raw_forward_calls,
-                                "unmask_steps": 0,
-                                "block_steps": [],
-                            }
-                        )
-                        + "\n"
-                    )
-
-            next_token_ids = []
-            return (
-                logits_output,
-                next_token_ids,
-                can_run_cuda_graph,
-                raw_forward_calls,
-                [],
-            )
-
-        # Calculate start positions for each block
-        for block_id in range(batch_size):
-            block_start = block_id * self.block_size
-            block_end = block_start + self.block_size
-            block_input_ids = forward_batch.input_ids[block_start:block_end]
-            block_mask_index = block_input_ids == self.mask_id
-            start = self.block_size - torch.sum(block_mask_index).item()
-            start_list.append(start)
-
-        # block_steps[i] = actual forward passes needed to fully unmask block i
-        block_steps = [0] * batch_size
-        unmask_steps = 0
-
-        for step in range(self.block_size):
-            mask_index = forward_batch.input_ids == self.mask_id
-            if torch.sum(mask_index).item() == 0:
-                break
-
-            out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
-            raw_forward_calls += 1
-            unmask_steps += 1
-            logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
-            assert batch_size == forward_batch.input_ids.shape[0] // self.block_size
-            for batch_id in range(batch_size):
-                curr_block_start = batch_id * self.block_size
-                curr_block_end = curr_block_start + self.block_size
-                block_input_ids = forward_batch.input_ids[
-                    curr_block_start:curr_block_end,
-                ]
-                block_mask_index = block_input_ids == self.mask_id
-                if torch.sum(block_mask_index).item() == 0:
-                    continue
-
-                block_steps[batch_id] = step + 1
-
-                curr_logits = logits_output.full_logits[
-                    curr_block_start:curr_block_end,
-                ]
-
-                x = torch.argmax(curr_logits, dim=-1)
-                p = torch.squeeze(
-                    torch.gather(
-                        F.softmax(curr_logits, dim=-1),
-                        dim=-1,
-                        index=torch.unsqueeze(x, -1),
-                    ),
-                    -1,
-                )
-                x = torch.where(block_mask_index, x, block_input_ids)
-                confidence = torch.where(block_mask_index, p, -np.inf)
-
-                transfer_index = confidence > self.threshold
-
-                if transfer_index.sum().item() == 0:
-                    _, select_index = torch.topk(confidence, k=1)
-                    transfer_index[select_index] = True
-
-                block_input_ids[transfer_index] = x[transfer_index]
-
         out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
-        raw_forward_calls += 1
         logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
+        raw_forward_calls = 1
+
+        req_modes = getattr(forward_batch, "dllm_req_modes", None)
+        if req_modes is None:
+            req_modes = []
+            for batch_id in range(batch_size):
+                block_start = batch_id * self.block_size
+                block_end = block_start + self.block_size
+                block_input_ids = forward_batch.input_ids[block_start:block_end]
+                req_modes.append(
+                    "unmask"
+                    if torch.any(block_input_ids == self.mask_id).item()
+                    else "prefill"
+                )
+
+        active_starts = getattr(forward_batch, "dllm_active_starts", None)
+        if active_starts is None:
+            active_starts = [0] * batch_size
+
+        prev_block_steps = getattr(forward_batch, "dllm_active_block_steps", None)
+        if prev_block_steps is None:
+            prev_block_steps = [0] * batch_size
+
+        next_token_ids: List[torch.Tensor] = []
+        updated_ids: List[Union[torch.Tensor, None]] = []
+        pending_kv_save = [False] * batch_size
+        kv_saved = [False] * batch_size
+        block_steps = list(prev_block_steps)
+
+        empty = torch.empty(0, dtype=forward_batch.input_ids.dtype, device="cpu")
+
+        for batch_id in range(batch_size):
+            curr_block_start = batch_id * self.block_size
+            curr_block_end = curr_block_start + self.block_size
+            block_input_ids = forward_batch.input_ids[curr_block_start:curr_block_end]
+            mode = req_modes[batch_id]
+
+            if mode == "kv_save":
+                start = int(active_starts[batch_id])
+                next_token_ids.append(block_input_ids[start:].detach().cpu())
+                updated_ids.append(None)
+                kv_saved[batch_id] = True
+                continue
+
+            if mode != "unmask":
+                next_token_ids.append(empty)
+                updated_ids.append(None)
+                block_steps[batch_id] = 0
+                continue
+
+            block_mask_index = block_input_ids == self.mask_id
+            if torch.sum(block_mask_index).item() == 0:
+                pending_kv_save[batch_id] = True
+                next_token_ids.append(empty)
+                updated_ids.append(block_input_ids.detach().cpu())
+                continue
+
+            curr_logits = logits_output.full_logits[curr_block_start:curr_block_end]
+            x = torch.argmax(curr_logits, dim=-1)
+            p = torch.squeeze(
+                torch.gather(
+                    F.softmax(curr_logits, dim=-1),
+                    dim=-1,
+                    index=torch.unsqueeze(x, -1),
+                ),
+                -1,
+            )
+            x = torch.where(block_mask_index, x, block_input_ids)
+            confidence = torch.where(block_mask_index, p, -np.inf)
+
+            transfer_index = confidence > self.threshold
+            if transfer_index.sum().item() == 0:
+                _, select_index = torch.topk(confidence, k=1)
+                transfer_index[select_index] = True
+
+            block_input_ids[transfer_index] = x[transfer_index]
+            block_steps[batch_id] = int(prev_block_steps[batch_id]) + 1
+            pending_kv_save[batch_id] = (
+                torch.sum(block_input_ids == self.mask_id).item() == 0
+            )
+            next_token_ids.append(empty)
+            updated_ids.append(block_input_ids.detach().cpu())
 
         if self.step_log_file is not None:
+            final_block_steps = [
+                int(step) for step, saved in zip(block_steps, kv_saved) if saved
+            ]
             with open(self.step_log_file, "a") as f:
                 f.write(
                     json.dumps(
                         {
                             "raw_forward_calls": raw_forward_calls,
-                            "unmask_steps": unmask_steps,
+                            "unmask_steps": 1
+                            if any(mode == "unmask" for mode in req_modes)
+                            else 0,
                             "block_steps": block_steps,
+                            "final_block_steps": final_block_steps,
+                            "req_modes": req_modes,
+                            "pending_kv_save": pending_kv_save,
+                            "kv_saved": kv_saved,
                         }
                     )
                     + "\n"
                 )
 
-        # Here next token ids is tricky to implement the dynamic lengths,
-        # so we return a list of tensors
-        next_token_ids = torch.reshape(forward_batch.input_ids, (batch_size, -1))
-        next_token_ids_list = [
-            next_token_ids[i, start_list[i] :] for i in range(batch_size)
-        ]
-
         return (
             logits_output,
-            next_token_ids_list,
+            next_token_ids,
             can_run_cuda_graph,
             raw_forward_calls,
             block_steps,
+            updated_ids,
+            pending_kv_save,
+            kv_saved,
+            req_modes,
         )
 
 

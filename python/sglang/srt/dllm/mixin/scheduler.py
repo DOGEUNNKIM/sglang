@@ -89,16 +89,44 @@ class SchedulerDllmMixin:
         if result.copy_done is not None:
             result.copy_done.synchronize()
 
-        if result.next_token_ids:
-            block_emit_time = time.perf_counter()
+        updated_ids = getattr(result, "dllm_updated_ids", None) or []
+        pending_kv_save = getattr(result, "dllm_pending_kv_save", None) or []
+        kv_saved = getattr(result, "dllm_kv_saved", None) or []
+        block_steps = getattr(result, "dllm_block_steps", None) or []
+        next_token_ids_list = result.next_token_ids or []
+        block_emit_time = time.perf_counter()
+        has_output = False
+        has_finished = False
+
+        if next_token_ids_list or updated_ids or pending_kv_save or kv_saved:
             self.token_to_kv_pool_allocator.free_group_begin()
 
             for idx in range(batch.batch_size()):
                 req = batch.reqs[idx]
 
-                next_token_ids = result.next_token_ids[idx].tolist()
+                if idx < len(updated_ids) and updated_ids[idx] is not None:
+                    req.dllm_active_ids = updated_ids[idx].tolist()
+                    if idx < len(block_steps) and block_steps[idx] is not None:
+                        req.dllm_active_block_steps = int(block_steps[idx])
+
+                if idx < len(pending_kv_save) and pending_kv_save[idx]:
+                    req.dllm_pending_kv_save = True
+
+                next_token_ids = []
+                if idx < len(next_token_ids_list):
+                    next_token_ids = next_token_ids_list[idx].tolist()
                 new_tokens = len(next_token_ids)
                 if new_tokens == 0:
+                    if idx < len(kv_saved) and kv_saved[idx]:
+                        self._commit_dllm_saved_block_prefix(req)
+                        req.clear_dllm_active_block()
+                    req.check_finished(new_accepted_len=0)
+                    if req.finished():
+                        req.clear_dllm_active_block()
+                        release_kv_cache(req, self.tree_cache)
+                        req.time_stats.set_completion_time()
+                        self._maybe_log_dllm_request_latency(req)
+                        has_finished = True
                     continue
 
                 req.fill_ids[-new_tokens:] = next_token_ids[:]
@@ -107,13 +135,18 @@ class SchedulerDllmMixin:
 
                 req.output_ids.extend(next_token_ids)
                 req.check_finished(new_accepted_len=new_tokens)
+                self._commit_dllm_saved_block_prefix(req)
+                req.clear_dllm_active_block()
+                has_output = True
 
                 if req.finished():
                     release_kv_cache(req, self.tree_cache)
                     req.time_stats.set_completion_time()
                     self._maybe_log_dllm_request_latency(req)
+                    has_finished = True
 
-            self.stream_output(batch.reqs, batch.return_logprob)
+            if has_output or has_finished:
+                self.stream_output(batch.reqs, batch.return_logprob)
             self.token_to_kv_pool_allocator.free_group_end()
 
         can_run_cuda_graph = getattr(result, "can_run_cuda_graph", False)
@@ -191,8 +224,7 @@ class SchedulerDllmMixin:
         batch.dllm_phase_switch_count = self.dllm_phase_switch_count
         batch.dllm_schedule_start_time = schedule_start_time
         batch.dllm_forward_start_time = time.perf_counter()
-        if self._get_dllm_batch_metric_log_file() is not None:
-            self._annotate_dllm_per_req_metrics(batch)
+        self._annotate_dllm_per_req_metrics(batch)
         self.dllm_batch_seq += 1
 
     def _annotate_dllm_per_req_metrics(self: Scheduler, batch: ScheduleBatch) -> None:
@@ -209,6 +241,9 @@ class SchedulerDllmMixin:
         effective_phases = []
         has_mask = []
         extend_input_lens = []
+        req_modes = []
+        active_starts = []
+        active_block_steps = []
         offset = 0
 
         for req in batch.reqs:
@@ -232,6 +267,34 @@ class SchedulerDllmMixin:
             req_has_mask = mask_id in chunk
             has_mask.append(req_has_mask)
             effective_phases.append("decode" if req_has_mask else "prefill")
+
+            if getattr(req, "dllm_pending_kv_save", False):
+                req_mode = "kv_save"
+            elif req_has_mask:
+                req_mode = "unmask"
+            else:
+                req_mode = "prefill"
+            req_modes.append(req_mode)
+
+            if req_mode in ("unmask", "kv_save"):
+                if req.dllm_active_ids is None:
+                    prefix_len = len(getattr(req, "prefix_indices", []))
+                    req.dllm_active_prefix_ids = list(req.fill_ids[:prefix_len])
+                    req.dllm_active_ids = list(chunk)
+                    req.dllm_active_start = self.dllm_config.block_size - chunk.count(
+                        mask_id
+                    )
+                    req.dllm_active_block_steps = 0
+                if req.dllm_active_cache_locs is None and batch.out_cache_loc is not None:
+                    req.dllm_active_cache_locs = batch.out_cache_loc[
+                        offset : offset + extend_len
+                    ].detach().clone()
+                req.dllm_active_prefix_len = len(getattr(req, "prefix_indices", []))
+                req.dllm_active_seq_len = len(req.fill_ids)
+                req.dllm_active_block_offset = req.dllm_block_offset
+
+            active_starts.append(getattr(req, "dllm_active_start", 0))
+            active_block_steps.append(getattr(req, "dllm_active_block_steps", 0))
             offset += extend_len
 
         batch.dllm_rids = rids
@@ -240,6 +303,9 @@ class SchedulerDllmMixin:
         batch.dllm_per_req_effective_phase = effective_phases
         batch.dllm_per_req_has_mask = has_mask
         batch.dllm_per_req_extend_input_len = extend_input_lens
+        batch.dllm_req_modes = req_modes
+        batch.dllm_active_starts = active_starts
+        batch.dllm_active_block_steps = active_block_steps
 
     def _maybe_log_dllm_batch_metrics(
         self: Scheduler,
@@ -274,6 +340,11 @@ class SchedulerDllmMixin:
             getattr(batch, "dllm_per_req_extend_input_len", [])
         )
         per_req_block_steps = getattr(result, "dllm_block_steps", None)
+        per_req_mode = getattr(result, "dllm_req_modes", None)
+        if per_req_mode is None:
+            per_req_mode = list(getattr(batch, "dllm_req_modes", []))
+        else:
+            per_req_mode = list(per_req_mode)
         if per_req_block_steps is None:
             per_req_block_steps = [None] * num_reqs
         else:
@@ -338,6 +409,7 @@ class SchedulerDllmMixin:
             "per_req_source_phase": per_req_phase,
             "per_req_exec_phase": per_req_exec_phase,
             "per_req_effective_phase": per_req_effective_phase,
+            "per_req_mode": per_req_mode,
             "per_req_has_mask": per_req_has_mask,
             "per_req_extend_input_len": per_req_extend_input_len,
             "per_req_block_steps": per_req_block_steps,
@@ -514,6 +586,44 @@ class SchedulerDllmMixin:
 
         return new_batch
 
+    def _commit_dllm_saved_block_prefix(self: Scheduler, req: Req) -> None:
+        """Expose a KV-saved DLLM block as committed prefix for later blocks."""
+        if req.req_pool_idx is None:
+            return
+
+        committed_len = len(req.fill_ids)
+        if committed_len == 0:
+            req.prefix_indices = self.req_to_token_pool.req_to_token.new_empty(
+                (0,), dtype=self.req_to_token_pool.req_to_token.dtype
+            )
+            return
+
+        req.prefix_indices = self.req_to_token_pool.req_to_token[
+            req.req_pool_idx, :committed_len
+        ].detach().clone()
+
+    def _restore_dllm_active_prefix_indices(self: Scheduler, req: Req) -> None:
+        """Set prefix_indices to physical KV locations for an active DLLM block."""
+        if not getattr(req, "has_dllm_active_block", lambda: False)():
+            return
+
+        prefix_len = getattr(req, "dllm_active_prefix_len", None)
+        if prefix_len is None:
+            return
+
+        if prefix_len == 0:
+            req.prefix_indices = self.req_to_token_pool.req_to_token.new_empty(
+                (0,), dtype=self.req_to_token_pool.req_to_token.dtype
+            )
+        else:
+            if req.req_pool_idx is None:
+                return
+            req.prefix_indices = self.req_to_token_pool.req_to_token[
+                req.req_pool_idx, :prefix_len
+            ].detach().clone()
+
+        req.set_extend_input_len(len(req.fill_ids) - len(req.prefix_indices))
+
     def process_dllm_incoming_reqs(
         self: Scheduler, adder: PrefillAdder, reqs: List[Req]
     ) -> AddReqResult:
@@ -557,6 +667,7 @@ class SchedulerDllmMixin:
         """Process staging DLLM requests with resource allocation."""
         for req in reqs:
             req.dllm_scheduled_source_phase = req.dllm_phase
+            self._restore_dllm_active_prefix_indices(req)
             res = adder.add_dllm_staging_req(req)
             req.dllm_scheduled_exec_phase = req.dllm_phase
             if res == AddReqResult.NO_TOKEN:
@@ -620,7 +731,7 @@ class DllmManager:
         """Check if both queues are empty or DLLM is not configured."""
         if self.dllm_config is None:
             return True
-        return len(self.waiting_queue) == 0
+        return len(self.waiting_queue) == 0 and len(self.staging_queue) == 0
 
     def increment_chunked_count(self) -> None:
         """Increment chunked count for all staging requests."""
@@ -636,4 +747,8 @@ class DllmManager:
         """Initialize staging requests for next round and clear staging queue."""
         for req in self.staging_queue:
             req.init_next_round_input()
+            if not req.finished() and all(
+                waiting_req.rid != req.rid for waiting_req in self.waiting_queue
+            ):
+                self.waiting_queue.append(req)
         self.staging_queue = []

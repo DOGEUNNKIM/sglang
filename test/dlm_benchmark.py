@@ -95,7 +95,18 @@ def _flatten_steps(values) -> List[int]:
 def _normalize_step_record(raw: Any) -> Dict[str, Any]:
     if isinstance(raw, dict):
         raw_forward_calls = raw.get("raw_forward_calls")
-        block_steps = _flatten_steps(raw.get("block_steps", []))
+        if "final_block_steps" in raw:
+            block_steps = _flatten_steps(raw.get("final_block_steps", []))
+        elif "kv_saved" in raw and "block_steps" in raw:
+            steps = _flatten_steps(raw.get("block_steps", []))
+            saved = raw.get("kv_saved", [])
+            block_steps = [
+                int(step)
+                for step, is_saved in zip(steps, saved)
+                if bool(is_saved)
+            ]
+        else:
+            block_steps = _flatten_steps(raw.get("block_steps", []))
     else:
         raw_forward_calls = None
         block_steps = _flatten_steps(raw)
