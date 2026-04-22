@@ -245,13 +245,13 @@ def _wait_server_ready(base_url: str, timeout: int = 600) -> bool:
 
 
 def launch_server(args) -> subprocess.Popen:
-    # step_log_file을 algorithm config에 넣기 위해 임시 yaml 생성
     config_path = "/tmp/dlm_algo_config.yaml"
     with open(config_path, "w") as f:
         f.write(f"threshold: {args.threshold}\n")
-        f.write(f"step_log_file: {STEP_LOG_FILE}\n")
-        f.write(f"request_latency_log_file: {REQUEST_LATENCY_LOG_FILE}\n")
-        f.write(f"batch_latency_log_file: {BATCH_LATENCY_LOG_FILE}\n")
+        if args.log:
+            f.write(f"step_log_file: {STEP_LOG_FILE}\n")
+            f.write(f"request_latency_log_file: {REQUEST_LATENCY_LOG_FILE}\n")
+            f.write(f"batch_latency_log_file: {BATCH_LATENCY_LOG_FILE}\n")
 
     cmd = [
         sys.executable, "-m", "sglang.launch_server",
@@ -609,6 +609,8 @@ def _count_per_req_phases(records: List[Dict[str, Any]]) -> Dict[str, int]:
 
 
 def _batch_visual_phase(record: Dict[str, Any]) -> str:
+    if record.get("phase") == "mixed_prefill_decode":
+        return "mixed_prefill_decode"
     phases = set(record.get("per_req_phase") or [])
     has_mask = record.get("per_req_has_mask") or []
     if has_mask and any(has_mask) and any(not value for value in has_mask):
@@ -664,6 +666,7 @@ def summarize_latency_metrics(
         ),
         "prefill_batches": phase_sequence.count("prefill"),
         "decode_batches": phase_sequence.count("decode"),
+        "mixed_prefill_decode_batches": phase_sequence.count("mixed_prefill_decode"),
         "phase_switches": sum(
             1
             for prev, cur in zip(phase_sequence, phase_sequence[1:])
@@ -806,6 +809,7 @@ def plot_latency_metrics(
         "staging_prefill": "#2C7BB6",
         "decode": "#D7191C",
         "mixed": "#Fdae61",
+        "mixed_prefill_decode": "#7B3294",
         "prefill": "#2C7BB6",
         "unknown": "#777777",
     }
@@ -814,6 +818,7 @@ def plot_latency_metrics(
         "staging_prefill": "D",
         "decode": "o",
         "mixed": "P",
+        "mixed_prefill_decode": "X",
         "prefill": "s",
         "unknown": "x",
     }
@@ -844,7 +849,13 @@ def plot_latency_metrics(
     handles = [
         plt.Line2D([0], [0], marker=phase_marker[p], color="w", label=p.replace("_", " "),
                    markerfacecolor=phase_color[p], markersize=8)
-        for p in ("initial_prefill", "staging_prefill", "decode", "mixed")
+        for p in (
+            "initial_prefill",
+            "staging_prefill",
+            "decode",
+            "mixed",
+            "mixed_prefill_decode",
+        )
     ]
     ax3.legend(handles=handles, loc="upper right")
 
@@ -949,6 +960,8 @@ def main():
     parser.add_argument("--block-size", type=int, default=None,
                         help="모델의 block_size (LLaDA2=32, SDAR=4). "
                              "미지정 시 step 축 범위를 자동 추정")
+    parser.add_argument("--log", action="store_true",
+                        help="DLM step/request/batch 로그를 수집하고 그래프를 생성")
 
     args = parser.parse_args()
 
@@ -957,10 +970,7 @@ def main():
     if args.base_url and args.model is None:
         parser.error("--base-url 사용 시 --model 필요")
 
-    # step_log_file이 서버에 기록되려면,
-    # 기존 서버는 반드시 step_log_file 설정된 config로 실행된 상태여야 함.
-    # 자동 실행 시 launch_server()가 config yaml을 자동 생성.
-    if args.base_url:
+    if args.base_url and args.log:
         print(
             "[warn] 기존 서버 사용 시 서버가 "
             f"step_log_file={STEP_LOG_FILE}, "
@@ -990,21 +1000,21 @@ def main():
             print(f"Task: {task.upper()}  |  model: {model}")
             print(f"{'='*60}")
 
-            clear_step_log()
-            clear_latency_logs()
-            # 이번 task의 raw step 데이터를 별도 파일에도 저장
-            task_step_file = Path(args.output_dir) / f"steps_{task}.jsonl"
-            if task_step_file.exists():
-                task_step_file.unlink()
-            task_request_latency_file = (
-                Path(args.output_dir) / f"request_latency_{task}.jsonl"
-            )
-            task_batch_latency_file = (
-                Path(args.output_dir) / f"batch_latency_{task}.jsonl"
-            )
-            for path in (task_request_latency_file, task_batch_latency_file):
-                if path.exists():
-                    path.unlink()
+            if args.log:
+                clear_step_log()
+                clear_latency_logs()
+                task_step_file = Path(args.output_dir) / f"steps_{task}.jsonl"
+                if task_step_file.exists():
+                    task_step_file.unlink()
+                task_request_latency_file = (
+                    Path(args.output_dir) / f"request_latency_{task}.jsonl"
+                )
+                task_batch_latency_file = (
+                    Path(args.output_dir) / f"batch_latency_{task}.jsonl"
+                )
+                for path in (task_request_latency_file, task_batch_latency_file):
+                    if path.exists():
+                        path.unlink()
 
             metrics = run_task(
                 task=task, base_url=base_url, model=model,
@@ -1014,26 +1024,31 @@ def main():
             )
             all_results[task] = metrics
 
-            step_metrics = read_step_log()
+            step_metrics = read_step_log() if args.log else {
+                "records": [],
+                "raw_forward_calls": [],
+                "block_steps": [],
+            }
             raw_forward_calls = step_metrics["raw_forward_calls"]
             block_steps = step_metrics["block_steps"]
             step_data[task] = {
                 "raw_forward_calls": raw_forward_calls,
                 "block_steps": block_steps,
             }
-            latency_records = read_latency_logs()
+            latency_records = (
+                read_latency_logs() if args.log else {"request": [], "batch": []}
+            )
             latency_data[task] = latency_records
-            # task별 raw step 파일에 복사 (plot 스크립트가 나중에 읽을 수 있도록)
-            if step_metrics["records"]:
+            if args.log and step_metrics["records"]:
                 task_step_file = Path(args.output_dir) / f"steps_{task}.jsonl"
                 with open(task_step_file, "w") as f:
                     for record in step_metrics["records"]:
                         f.write(json.dumps(record) + "\n")
-            if latency_records["request"]:
+            if args.log and latency_records["request"]:
                 with open(task_request_latency_file, "w") as f:
                     for record in latency_records["request"]:
                         f.write(json.dumps(record) + "\n")
-            if latency_records["batch"]:
+            if args.log and latency_records["batch"]:
                 with open(task_batch_latency_file, "w") as f:
                     for record in latency_records["batch"]:
                         f.write(json.dumps(record) + "\n")
@@ -1060,17 +1075,21 @@ def main():
                       f"mean={np.mean(block_steps):.2f}  "
                       f"median={np.median(block_steps):.1f}  "
                       f"max={max(block_steps)}")
-            print(
-                f"[{task}] latency stats: "
-                f"mean_ttfb_ms={latency_summary.get('mean_ttfb_ms')}  "
-                f"mean_tpob_ms={latency_summary.get('mean_tpob_ms')}  "
-                f"avg_prefill_req_ms={latency_summary.get('avg_prefill_req_ms')}  "
-                f"avg_decode_block_ms={latency_summary.get('avg_decode_block_ms')}  "
-                f"initial_prefill_req_ms={latency_summary.get('avg_initial_prefill_req_ms')}  "
-                f"staging_prefill_req_ms={latency_summary.get('avg_staging_prefill_req_ms')}  "
-                f"mixed_batches={latency_summary.get('mixed_mask_batches')}  "
-                f"phase_switches={latency_summary.get('phase_switches')}"
-            )
+            if args.log:
+                print(
+                    f"[{task}] latency stats: "
+                    f"mean_ttfb_ms={latency_summary.get('mean_ttfb_ms')}  "
+                    f"mean_tpob_ms={latency_summary.get('mean_tpob_ms')}  "
+                    f"avg_prefill_req_ms={latency_summary.get('avg_prefill_req_ms')}  "
+                    f"avg_decode_block_ms={latency_summary.get('avg_decode_block_ms')}  "
+                    f"initial_prefill_req_ms={latency_summary.get('avg_initial_prefill_req_ms')}  "
+                    f"staging_prefill_req_ms={latency_summary.get('avg_staging_prefill_req_ms')}  "
+                    f"mixed_batches={latency_summary.get('mixed_mask_batches')}  "
+                    f"mixed_prefill_decode_batches={latency_summary.get('mixed_prefill_decode_batches')}  "
+                    f"phase_switches={latency_summary.get('phase_switches')}"
+                )
+            else:
+                print(f"[{task}] DLM logging disabled; pass --log to collect latency/step stats")
             if latency_summary.get("request_phase_counts"):
                 print(
                     f"[{task}] request phase counts: "
@@ -1133,9 +1152,10 @@ def main():
             ]
             block_size = max(all_steps_flat) if all_steps_flat else 32
 
-        plot_step_distributions(step_data, block_size=block_size,
-                                model_name=model, output_dir=args.output_dir)
-        plot_latency_metrics(latency_data, model_name=model, output_dir=args.output_dir)
+        if args.log:
+            plot_step_distributions(step_data, block_size=block_size,
+                                    model_name=model, output_dir=args.output_dir)
+            plot_latency_metrics(latency_data, model_name=model, output_dir=args.output_dir)
 
     finally:
         if server_proc is not None:

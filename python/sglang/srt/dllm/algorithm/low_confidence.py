@@ -69,6 +69,7 @@ class LowConfidence(DllmAlgorithm):
         pending_kv_save = [False] * batch_size
         kv_saved = [False] * batch_size
         block_steps = list(prev_block_steps)
+        needs_cpu_block = [False] * batch_size
 
         empty = torch.empty(0, dtype=forward_batch.input_ids.dtype, device="cpu")
 
@@ -79,10 +80,10 @@ class LowConfidence(DllmAlgorithm):
             mode = req_modes[batch_id]
 
             if mode == "kv_save":
-                start = int(active_starts[batch_id])
-                next_token_ids.append(block_input_ids[start:].detach().cpu())
+                next_token_ids.append(empty)
                 updated_ids.append(None)
                 kv_saved[batch_id] = True
+                needs_cpu_block[batch_id] = True
                 continue
 
             if mode != "unmask":
@@ -92,12 +93,6 @@ class LowConfidence(DllmAlgorithm):
                 continue
 
             block_mask_index = block_input_ids == self.mask_id
-            if torch.sum(block_mask_index).item() == 0:
-                pending_kv_save[batch_id] = True
-                next_token_ids.append(empty)
-                updated_ids.append(block_input_ids.detach().cpu())
-                continue
-
             curr_logits = logits_output.full_logits[curr_block_start:curr_block_end]
             x = torch.argmax(curr_logits, dim=-1)
             p = torch.squeeze(
@@ -112,17 +107,33 @@ class LowConfidence(DllmAlgorithm):
             confidence = torch.where(block_mask_index, p, -np.inf)
 
             transfer_index = confidence > self.threshold
-            if transfer_index.sum().item() == 0:
-                _, select_index = torch.topk(confidence, k=1)
-                transfer_index[select_index] = True
+            select_index = torch.argmax(confidence)
+            transfer_index[select_index] = True
 
             block_input_ids[transfer_index] = x[transfer_index]
             block_steps[batch_id] = int(prev_block_steps[batch_id]) + 1
-            pending_kv_save[batch_id] = (
-                torch.sum(block_input_ids == self.mask_id).item() == 0
-            )
             next_token_ids.append(empty)
-            updated_ids.append(block_input_ids.detach().cpu())
+            updated_ids.append(None)
+            needs_cpu_block[batch_id] = True
+
+        if any(needs_cpu_block):
+            block_cpu = (
+                forward_batch.input_ids.reshape(batch_size, self.block_size)
+                .detach()
+                .cpu()
+            )
+            remaining_masks = (block_cpu == self.mask_id).any(dim=1).tolist()
+            for batch_id, needs_cpu in enumerate(needs_cpu_block):
+                if not needs_cpu:
+                    continue
+
+                mode = req_modes[batch_id]
+                if mode == "kv_save":
+                    start = int(active_starts[batch_id])
+                    next_token_ids[batch_id] = block_cpu[batch_id, start:].clone()
+                elif mode == "unmask":
+                    pending_kv_save[batch_id] = not bool(remaining_masks[batch_id])
+                    updated_ids[batch_id] = block_cpu[batch_id].clone()
 
         if self.step_log_file is not None:
             final_block_steps = [

@@ -24,6 +24,15 @@ MAMBA_STATE_PER_REQ_NO_CACHE = 1
 logger = logging.getLogger(__name__)
 
 
+def _prefix_indices_to_tensor(req: Req, device: torch.device) -> torch.Tensor:
+    prefix_indices = req.prefix_indices
+    if torch.is_tensor(prefix_indices):
+        if prefix_indices.device == device and prefix_indices.dtype == torch.int64:
+            return prefix_indices
+        return prefix_indices.to(device=device, dtype=torch.int64, non_blocking=True)
+    return torch.tensor(prefix_indices, dtype=torch.int64, device=device)
+
+
 @triton.jit
 def write_req_to_token_pool_triton(
     req_to_token_ptr,  # [max_batch, max_context_len]
@@ -340,14 +349,7 @@ def alloc_for_extend(
     batch.maybe_evict_swa()
 
     prefix_tensors = [
-        (
-            r.prefix_indices.to(
-                device=batch.device, dtype=torch.int64, non_blocking=True
-            )
-            if torch.is_tensor(r.prefix_indices)
-            else torch.tensor(r.prefix_indices, dtype=torch.int64, device=batch.device)
-        )
-        for r in batch.reqs
+        _prefix_indices_to_tensor(req, batch.device) for req in batch.reqs
     ]
 
     # Create tensors for allocation

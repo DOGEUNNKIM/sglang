@@ -33,12 +33,14 @@ class SchedulerDllmMixin:
         self.dllm_phase_switch_count = 0
         self.dllm_prefill_batch_count = 0
         self.dllm_decode_batch_count = 0
+        self.dllm_mixed_prefill_decode_batch_count = 0
         self.dllm_prefill_req_time_sum = 0.0
         self.dllm_prefill_req_count = 0
         self.dllm_prefill_batch_time_sum = 0.0
         self.dllm_decode_block_time_sum = 0.0
         self.dllm_decode_block_count = 0
         self.dllm_decode_batch_time_sum = 0.0
+        self.dllm_mixed_prefill_decode_batch_time_sum = 0.0
 
     def get_new_batch_dllm(self: Scheduler) -> Optional[ScheduleBatch]:
         """Generate a new batch for DLLM (Diffusion LLM) scheduling."""
@@ -195,7 +197,11 @@ class SchedulerDllmMixin:
 
     @staticmethod
     def _get_dllm_batch_phase(reqs: List[Req]) -> str:
-        if any(req.is_dllm_prefill() for req in reqs):
+        has_prefill = any(req.is_dllm_prefill() for req in reqs)
+        has_decode = any(not req.is_dllm_prefill() for req in reqs)
+        if has_prefill and has_decode:
+            return "mixed_prefill_decode"
+        if has_prefill:
             return "prefill"
         return "decode"
 
@@ -215,8 +221,10 @@ class SchedulerDllmMixin:
 
         if batch_phase == "prefill":
             self.dllm_prefill_batch_count += 1
-        else:
+        elif batch_phase == "decode":
             self.dllm_decode_batch_count += 1
+        elif batch_phase == "mixed_prefill_decode":
+            self.dllm_mixed_prefill_decode_batch_count += 1
 
         batch.dllm_batch_seq = self.dllm_batch_seq
         batch.dllm_batch_phase = batch_phase
@@ -230,10 +238,6 @@ class SchedulerDllmMixin:
     def _annotate_dllm_per_req_metrics(self: Scheduler, batch: ScheduleBatch) -> None:
         """Snapshot request-level DLLM metadata before forward mutates inputs."""
         mask_id = self.dllm_config.mask_id
-        input_ids = getattr(batch, "input_ids", None)
-        flat_input_ids = (
-            input_ids.detach().cpu().tolist() if input_ids is not None else []
-        )
 
         rids = []
         phases = []
@@ -260,10 +264,8 @@ class SchedulerDllmMixin:
 
             extend_len = int(getattr(req, "extend_input_len", 0) or 0)
             extend_input_lens.append(extend_len)
-            chunk = flat_input_ids[offset : offset + extend_len]
-            if len(chunk) < extend_len:
-                prefix_len = len(getattr(req, "prefix_indices", []))
-                chunk = req.fill_ids[prefix_len : prefix_len + extend_len]
+            prefix_len = len(getattr(req, "prefix_indices", []))
+            chunk = req.fill_ids[prefix_len : prefix_len + extend_len]
             req_has_mask = mask_id in chunk
             has_mask.append(req_has_mask)
             effective_phases.append("decode" if req_has_mask else "prefill")
@@ -278,7 +280,6 @@ class SchedulerDllmMixin:
 
             if req_mode in ("unmask", "kv_save"):
                 if req.dllm_active_ids is None:
-                    prefix_len = len(getattr(req, "prefix_indices", []))
                     req.dllm_active_prefix_ids = list(req.fill_ids[:prefix_len])
                     req.dllm_active_ids = list(chunk)
                     req.dllm_active_start = self.dllm_config.block_size - chunk.count(
@@ -377,6 +378,15 @@ class SchedulerDllmMixin:
             if num_output_blocks > 0:
                 self.dllm_decode_block_time_sum += duration_s * num_output_blocks
                 self.dllm_decode_block_count += num_output_blocks
+        elif phase == "mixed_prefill_decode":
+            self.dllm_mixed_prefill_decode_batch_time_sum += duration_s
+            prefill_reqs = num_initial_prefill_reqs + num_staging_prefill_reqs
+            if prefill_reqs > 0:
+                self.dllm_prefill_req_time_sum += duration_s * prefill_reqs
+                self.dllm_prefill_req_count += prefill_reqs
+            if num_output_blocks > 0:
+                self.dllm_decode_block_time_sum += duration_s * num_output_blocks
+                self.dllm_decode_block_count += num_output_blocks
 
         avg_prefill_req_s = (
             self.dllm_prefill_req_time_sum / self.dllm_prefill_req_count
@@ -431,6 +441,9 @@ class SchedulerDllmMixin:
             "schedule_prepare_ms": schedule_prepare_s * 1000,
             "prefill_batch_count": self.dllm_prefill_batch_count,
             "decode_batch_count": self.dllm_decode_batch_count,
+            "mixed_prefill_decode_batch_count": (
+                self.dllm_mixed_prefill_decode_batch_count
+            ),
             "prefill_req_count": self.dllm_prefill_req_count,
             "decode_block_count": self.dllm_decode_block_count,
             "avg_prefill_req_s": avg_prefill_req_s,
@@ -500,27 +513,33 @@ class SchedulerDllmMixin:
         )
 
     def _process_dllm_batches(self: Scheduler, adder: PrefillAdder) -> ForwardMode:
-        """Process prefill or decode batches for DLLM."""
+        """Process DLLM batches, filling decode into remaining prefill budget."""
         forward_mode = ForwardMode.DLLM_EXTEND
 
-        # Try prefill batch first
         prefill_reqs = self.dllm_manager.get_prefill_requests()
+        prefill_result = AddReqResult.CONTINUE
         if prefill_reqs:
-            self._process_batch_by_phase(
+            prefill_result = self._process_batch_by_phase(
                 adder,
                 prefill_reqs,
                 DllmReqPhase.STAGING_PREFILL,
                 DllmReqPhase.INCOMING_PREFILL,
             )
-        else:
-            # Fall back to decode batch
-            decode_reqs = self.dllm_manager.get_decode_requests()
-            self._process_batch_by_phase(
-                adder,
-                decode_reqs,
-                DllmReqPhase.STAGING_DECODE,
-                DllmReqPhase.INCOMING_DECODE,
-            )
+
+        if prefill_result == AddReqResult.CONTINUE:
+            scheduled_reqs = {req.rid for req in adder.can_run_list}
+            decode_reqs = [
+                req
+                for req in self.dllm_manager.get_decode_requests()
+                if req.rid not in scheduled_reqs
+            ]
+            if decode_reqs:
+                self._process_batch_by_phase(
+                    adder,
+                    decode_reqs,
+                    DllmReqPhase.STAGING_DECODE,
+                    DllmReqPhase.INCOMING_DECODE,
+                )
 
         return forward_mode
 
@@ -530,17 +549,20 @@ class SchedulerDllmMixin:
         batch: List[Req],
         staging_phase: DllmReqPhase,
         incoming_phase: DllmReqPhase,
-    ) -> None:
+    ) -> AddReqResult:
         """Process a batch, separating staging and incoming requests."""
+        res = AddReqResult.CONTINUE
         staging_reqs = [req for req in batch if req.dllm_phase == staging_phase]
         if staging_reqs:
-            staging_result = self.process_dllm_staging_reqs(adder, staging_reqs)
-            if staging_result != AddReqResult.CONTINUE:
-                return
+            res = self.process_dllm_staging_reqs(adder, staging_reqs)
+            if res != AddReqResult.CONTINUE:
+                return res
 
         incoming_reqs = [req for req in batch if req.dllm_phase == incoming_phase]
         if incoming_reqs:
-            self.process_dllm_incoming_reqs(adder, incoming_reqs)
+            res = self.process_dllm_incoming_reqs(adder, incoming_reqs)
+
+        return res
 
     def _update_state_for_batch(
         self: Scheduler, can_run_list: List[Req], adder: PrefillAdder, running_bs: int
