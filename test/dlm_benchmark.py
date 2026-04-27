@@ -283,8 +283,22 @@ def launch_server(args) -> subprocess.Popen:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Warmup
+# Cache flush & Warmup
 # ──────────────────────────────────────────────────────────────────────────────
+
+def flush_server_cache(base_url: str, timeout: float = 30.0) -> bool:
+    """Call /flush_cache to release fragmented GPU memory between tasks."""
+    import requests as req_lib
+    try:
+        resp = req_lib.post(f"{base_url}/flush_cache", timeout=timeout)
+        if resp.status_code == 200:
+            print(f"[flush_cache] {resp.text.strip()}")
+            return True
+        print(f"[flush_cache] failed ({resp.status_code}): {resp.text.strip()}")
+        return False
+    except Exception as e:
+        print(f"[flush_cache] error: {e}")
+        return False
 
 _WARMUP_MAX_TOKENS = 2048
 # Intentionally minimal prompt so seq_len starts near 0 and sweeps through
@@ -1176,12 +1190,12 @@ def main():
         step_data: Dict[str, Dict[str, List[int]]] = {}
         latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
 
-        run_warmup(base_url, model, num_requests=args.warmup)
-
         for task in args.tasks:
             print(f"\n{'='*60}")
             print(f"Task: {task.upper()}  |  model: {model}")
             print(f"{'='*60}")
+            flush_server_cache(base_url)
+            run_warmup(base_url, model, num_requests=args.warmup)
 
             if args.log:
                 clear_step_log()
