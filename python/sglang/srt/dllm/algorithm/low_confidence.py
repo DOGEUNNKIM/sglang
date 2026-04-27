@@ -1,4 +1,5 @@
 import json
+import time
 from typing import List, Tuple, Union
 
 import numpy as np
@@ -39,9 +40,18 @@ class LowConfidence(DllmAlgorithm):
         List[str],
     ]:
         batch_size = forward_batch.batch_size
+
+        if self.step_log_file is not None:
+            torch.cuda.synchronize()
+            _t0 = time.perf_counter()
+
         out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
         logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
         raw_forward_calls = 1
+
+        if self.step_log_file is not None:
+            torch.cuda.synchronize()
+            _forward_duration_ms = (time.perf_counter() - _t0) * 1000
 
         req_modes = getattr(forward_batch, "dllm_req_modes", None)
         if req_modes is None:
@@ -144,6 +154,7 @@ class LowConfidence(DllmAlgorithm):
                     json.dumps(
                         {
                             "raw_forward_calls": raw_forward_calls,
+                            "forward_duration_ms": round(_forward_duration_ms, 3),
                             "unmask_steps": 1
                             if any(mode == "unmask" for mode in req_modes)
                             else 0,

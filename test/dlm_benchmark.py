@@ -120,26 +120,31 @@ def _normalize_step_record(raw: Any) -> Dict[str, Any]:
 
 
 def read_step_log() -> Dict[str, Any]:
-    """JSONL에서 raw forward calls와 block steps를 읽어 반환."""
+    """JSONL에서 raw forward calls, block steps, forward duration을 읽어 반환."""
     step_records = []
     raw_forward_calls = []
     block_steps = []
+    forward_durations_ms = []
     try:
         with open(STEP_LOG_FILE) as f:
             for line in f:
                 line = line.strip()
                 if line:
-                    record = _normalize_step_record(json.loads(line))
+                    raw = json.loads(line)
+                    record = _normalize_step_record(raw)
                     step_records.append(record)
                     if record["raw_forward_calls"] is not None:
                         raw_forward_calls.append(record["raw_forward_calls"])
                     block_steps.extend(record["block_steps"])
+                    if isinstance(raw, dict) and raw.get("forward_duration_ms") is not None:
+                        forward_durations_ms.append(float(raw["forward_duration_ms"]))
     except FileNotFoundError:
         pass
     return {
         "records": step_records,
         "raw_forward_calls": raw_forward_calls,
         "block_steps": block_steps,
+        "forward_durations_ms": forward_durations_ms,
     }
 
 
@@ -534,7 +539,7 @@ def plot_step_distributions(
     if forward_tasks:
         forward_bp = axes2[0].boxplot(
             [step_data[t]["raw_forward_calls"] for t in forward_tasks],
-            labels=[t.upper() for t in forward_tasks],
+            tick_labels=[t.upper() for t in forward_tasks],
             patch_artist=True,
             notch=False,
         )
@@ -551,7 +556,7 @@ def plot_step_distributions(
     if block_tasks:
         block_bp = axes2[1].boxplot(
             [step_data[t]["block_steps"] for t in block_tasks],
-            labels=[t.upper() for t in block_tasks],
+            tick_labels=[t.upper() for t in block_tasks],
             patch_artist=True,
             notch=False,
         )
@@ -718,6 +723,101 @@ def summarize_latency_metrics(
     }
 
 
+def plot_forward_latency(
+    step_data: Dict[str, Dict],
+    model_name: str,
+    output_dir: str,
+):
+    """Visualize forward call latency distribution and timeline."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    tasks = [
+        task
+        for task, metrics in step_data.items()
+        if metrics.get("forward_durations_ms")
+    ]
+    if not tasks:
+        print("[plot] no forward_duration_ms data (check step_log_file config)")
+        return
+
+    colors = {"gsm8k": "#4C72B0", "humaneval": "#DD8452", "math": "#55A868"}
+    model_tag = model_name.replace("/", "_")
+
+    # ── 히스토그램 + 타임라인 ──────────────────────────────────────────
+    fig, axes = plt.subplots(2, len(tasks), figsize=(5 * len(tasks), 8), sharey=False)
+    if len(tasks) == 1:
+        axes = [[axes[0]], [axes[1]]]
+
+    for idx, task in enumerate(tasks):
+        durations = step_data[task]["forward_durations_ms"]
+        color = colors.get(task, "#777")
+        hist_ax = axes[0][idx]
+        seq_ax = axes[1][idx]
+
+        # histogram
+        hist_ax.hist(durations, bins=40, color=color, edgecolor="white", linewidth=0.4)
+        mean_val = float(np.mean(durations))
+        p95_val = float(np.percentile(durations, 95))
+        hist_ax.axvline(mean_val, color="red", linestyle="--", linewidth=1.2,
+                        label=f"mean={mean_val:.1f} ms")
+        hist_ax.axvline(p95_val, color="orange", linestyle=":", linewidth=1.2,
+                        label=f"p95={p95_val:.1f} ms")
+        hist_ax.set_title(f"{task.upper()} — Forward latency distribution", fontsize=12, fontweight="bold")
+        hist_ax.set_xlabel("Forward latency (ms)", fontsize=10)
+        hist_ax.set_ylabel("Count", fontsize=10)
+        hist_ax.legend(fontsize=8)
+        hist_ax.text(
+            0.97, 0.97,
+            f"n={len(durations)}\nmean={mean_val:.1f}\n"
+            f"p50={np.percentile(durations, 50):.1f}\n"
+            f"p95={p95_val:.1f}\n"
+            f"p99={np.percentile(durations, 99):.1f}\n"
+            f"max={max(durations):.1f}",
+            transform=hist_ax.transAxes, fontsize=8, va="top", ha="right",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
+        )
+
+        # timeline (latency per call sequence)
+        seq_ax.plot(durations, color=color, linewidth=0.6, alpha=0.7)
+        seq_ax.axhline(mean_val, color="red", linestyle="--", linewidth=1.0,
+                       label=f"mean={mean_val:.1f} ms")
+        seq_ax.axhline(p95_val, color="orange", linestyle=":", linewidth=1.0,
+                       label=f"p95={p95_val:.1f} ms")
+        seq_ax.set_title(f"{task.upper()} — Forward latency timeline", fontsize=12, fontweight="bold")
+        seq_ax.set_xlabel("Forward call sequence", fontsize=10)
+        seq_ax.set_ylabel("Latency (ms)", fontsize=10)
+        seq_ax.legend(fontsize=8)
+
+    fig.suptitle(f"Forward call latency — {model_name}", fontsize=13)
+    fig.tight_layout()
+    out_path = Path(output_dir) / f"forward_latency_{model_tag}.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"[plot] saved → {out_path}")
+    plt.close(fig)
+
+    # ── Task 간 박스 플롯 비교 ─────────────────────────────────────────
+    fig2, ax2 = plt.subplots(figsize=(max(6, 2.5 * len(tasks) + 2), 4))
+    bp = ax2.boxplot(
+        [step_data[t]["forward_durations_ms"] for t in tasks],
+        tick_labels=[t.upper() for t in tasks],
+        patch_artist=True,
+        notch=False,
+    )
+    for patch, task in zip(bp["boxes"], tasks):
+        patch.set_facecolor(colors.get(task, "#777"))
+        patch.set_alpha(0.7)
+    ax2.set_ylabel("Forward latency (ms)", fontsize=11)
+    ax2.set_title("Forward latency distribution by task", fontsize=12)
+    ax2.yaxis.grid(True, linestyle="--", alpha=0.5)
+
+    fig2.tight_layout()
+    out_path2 = Path(output_dir) / f"forward_latency_boxplot_{model_tag}.png"
+    fig2.savefig(out_path2, dpi=150, bbox_inches="tight")
+    print(f"[plot] saved → {out_path2}")
+    plt.close(fig2)
+
+
 def plot_latency_metrics(
     latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]],
     model_name: str,
@@ -754,7 +854,7 @@ def plot_latency_metrics(
             ]
             bp = ax.boxplot(
                 data,
-                labels=[task.upper() for task in plot_tasks],
+                tick_labels=[task.upper() for task in plot_tasks],
                 patch_artist=True,
                 notch=False,
             )
@@ -1076,12 +1176,15 @@ def main():
                 "records": [],
                 "raw_forward_calls": [],
                 "block_steps": [],
+                "forward_durations_ms": [],
             }
             raw_forward_calls = step_metrics["raw_forward_calls"]
             block_steps = step_metrics["block_steps"]
+            forward_durations_ms = step_metrics.get("forward_durations_ms", [])
             step_data[task] = {
                 "raw_forward_calls": raw_forward_calls,
                 "block_steps": block_steps,
+                "forward_durations_ms": forward_durations_ms,
             }
             latency_records = (
                 read_latency_logs() if args.log else {"request": [], "batch": []}
@@ -1123,6 +1226,14 @@ def main():
                       f"mean={np.mean(block_steps):.2f}  "
                       f"median={np.median(block_steps):.1f}  "
                       f"max={max(block_steps)}")
+            if forward_durations_ms:
+                import numpy as np
+                print(f"[{task}] forward latency (ms): n={len(forward_durations_ms)}  "
+                      f"mean={np.mean(forward_durations_ms):.1f}  "
+                      f"p50={np.percentile(forward_durations_ms, 50):.1f}  "
+                      f"p95={np.percentile(forward_durations_ms, 95):.1f}  "
+                      f"p99={np.percentile(forward_durations_ms, 99):.1f}  "
+                      f"max={max(forward_durations_ms):.1f}")
             if args.log:
                 print(
                     f"[{task}] latency stats: "
@@ -1207,6 +1318,7 @@ def main():
         if args.log:
             plot_step_distributions(step_data, block_size=block_size,
                                     model_name=model, output_dir=args.output_dir)
+            plot_forward_latency(step_data, model_name=model, output_dir=args.output_dir)
             plot_latency_metrics(latency_data, model_name=model, output_dir=args.output_dir)
 
     finally:
