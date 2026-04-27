@@ -283,6 +283,30 @@ def launch_server(args) -> subprocess.Popen:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Warmup
+# ──────────────────────────────────────────────────────────────────────────────
+
+def run_warmup(base_url: str, model: str, num_requests: int = 4) -> None:
+    """Send dummy requests to trigger Triton kernel JIT compilation before benchmarking."""
+    if num_requests <= 0:
+        return
+    import concurrent.futures
+    from sglang.test.simple_eval_common import ChatCompletionSampler
+    sampler = ChatCompletionSampler(
+        model=model,
+        max_tokens=64,
+        base_url=f"{base_url}/v1",
+        temperature=0.0,
+    )
+    prompt = [{"role": "user", "content": "Hello, what is 1+1?"}]
+    print(f"[warmup] sending {num_requests} dummy requests to compile Triton kernels...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_requests) as ex:
+        futs = [ex.submit(sampler, prompt) for _ in range(num_requests)]
+        concurrent.futures.wait(futs)
+    print("[warmup] done")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 태스크 실행
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -1107,6 +1131,8 @@ def main():
                              "미지정 시 step 축 범위를 자동 추정")
     parser.add_argument("--log", action="store_true",
                         help="DLM step/request/batch 로그를 수집하고 그래프를 생성")
+    parser.add_argument("--warmup", type=int, default=4,
+                        help="벤치마크 전 Triton 커널 컴파일을 위해 보낼 더미 요청 수 (0 = 비활성)")
 
     args = parser.parse_args()
 
@@ -1141,6 +1167,8 @@ def main():
         all_results: Dict[str, Dict] = {}
         step_data: Dict[str, Dict[str, List[int]]] = {}
         latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+
+        run_warmup(base_url, model, num_requests=args.warmup)
 
         for task in args.tasks:
             print(f"\n{'='*60}")
