@@ -286,20 +286,28 @@ def launch_server(args) -> subprocess.Popen:
 # Warmup
 # ──────────────────────────────────────────────────────────────────────────────
 
+_WARMUP_MAX_TOKENS = 2048
+# Intentionally minimal prompt so seq_len starts near 0 and sweeps through
+# all FlashInfer compilation buckets (64, 128, 256, 512, 1024, 2048) during
+# generation, rather than skipping low buckets due to a long prompt.
+_WARMUP_PROMPT = "Hi"
+
+
 def run_warmup(base_url: str, model: str, num_requests: int = 4) -> None:
-    """Send dummy requests to trigger Triton kernel JIT compilation before benchmarking."""
+    """Send dummy requests with the largest expected seq_len to compile all
+    Triton kernel shapes before benchmarking starts."""
     if num_requests <= 0:
         return
     import concurrent.futures
     from sglang.test.simple_eval_common import ChatCompletionSampler
     sampler = ChatCompletionSampler(
         model=model,
-        max_tokens=64,
+        max_tokens=_WARMUP_MAX_TOKENS,
         base_url=f"{base_url}/v1",
         temperature=0.0,
     )
-    prompt = [{"role": "user", "content": "Hello, what is 1+1?"}]
-    print(f"[warmup] sending {num_requests} dummy requests to compile Triton kernels...")
+    prompt = [{"role": "user", "content": _WARMUP_PROMPT}]
+    print(f"[warmup] sending {num_requests} dummy requests (max_tokens={_WARMUP_MAX_TOKENS})...")
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_requests) as ex:
         futs = [ex.submit(sampler, prompt) for _ in range(num_requests)]
         concurrent.futures.wait(futs)
