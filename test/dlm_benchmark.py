@@ -1535,7 +1535,8 @@ def main():
             plot_forward_latency(step_data, model_name=model, output_dir=args.output_dir)
             plot_context_length_distribution(latency_data, model_name=model, output_dir=args.output_dir)
             plot_scheduling_delays(latency_data, model_name=model, output_dir=args.output_dir)
-            plot_latency_metrics(latency_data, model_name=model, output_dir=args.output_dir)
+            # takes too long time to make figure
+            #plot_latency_metrics(latency_data, model_name=model, output_dir=args.output_dir)
 
     finally:
         if server_proc is not None:

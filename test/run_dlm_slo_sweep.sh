@@ -8,7 +8,7 @@ WARMUP="${WARMUP:-16}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 REQUEST_RATES=(${REQUEST_RATES:-2 4 8})
 TASKS=(${TASKS:-gsm8k humaneval math})
-NUM_EXAMPLES="${NUM_EXAMPLES:-1500}"
+NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
 PORT="${PORT:-30000}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
@@ -65,7 +65,7 @@ for RATE in "${REQUEST_RATES[@]}"; do
 
     write_dllm_config
 
-    PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6 \
+    PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.6 \
     python -m sglang.launch_server \
         --model-path "${MODEL_PATH}" \
         --port "${PORT}" \
@@ -74,7 +74,8 @@ for RATE in "${REQUEST_RATES[@]}"; do
         --dllm-algorithm-config "${CONFIG_PATH}" \
         --attention-backend flashinfer \
         --max-running-requests "${MAX_RUNNING_REQUESTS}" \
-        --disable-cuda-graph-padding &
+        --disable-cuda-graph-padding \
+        >> /tmp/dlm_results/run_dlm_slo_server_log.txt 2>&1 &
     SERVER_PID=$!
 
     echo "[server] pid=${SERVER_PID}, waiting for ${BASE_URL}/health"
