@@ -99,7 +99,7 @@ for RATE in "${REQUEST_RATES[@]}"; do
         BENCH_ARGS+=(--num-examples "${NUM_EXAMPLES}")
     fi
 
-    PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.6 \
+    PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.6 \
     python "${BENCH_ARGS[@]}"
 
     stop_server
