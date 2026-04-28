@@ -336,14 +336,21 @@ TASK_API = {"gsm8k": "completion", "humaneval": "chat", "math": "chat"}
 TASK_MAX_TOKENS = {"gsm8k": 512, "humaneval": 512, "math": 1024}
 
 
-def _make_sampler(task: str, base_url: str, model: str):
+def _make_sampler(task: str, base_url: str, model: str,
+                  num_output_blocks: int = 0, block_size: int = 32):
     from sglang.test.simple_eval_common import ChatCompletionSampler, CompletionSampler
-    kw = dict(model=model, max_tokens=TASK_MAX_TOKENS[task],
+    if num_output_blocks > 0:
+        max_tokens = num_output_blocks * block_size
+        extra_body = {"ignore_eos": True}
+    else:
+        max_tokens = TASK_MAX_TOKENS[task]
+        extra_body = None
+    kw = dict(model=model, max_tokens=max_tokens,
               base_url=f"{base_url}/v1", temperature=0.0)
     if TASK_API[task] == "completion":
-        return CompletionSampler(**kw, stop=["Question", "Assistant:", "<|separator|>"])
-    # humaneval: chat API, stop token 없음
-    return ChatCompletionSampler(**kw)
+        return CompletionSampler(**kw, stop=["Question", "Assistant:", "<|separator|>"],
+                                 extra_body=extra_body)
+    return ChatCompletionSampler(**kw, extra_body=extra_body)
 
 
 class RateLimitedSampler:
@@ -374,8 +381,12 @@ def run_task(task: str, base_url: str, model: str,
              num_examples: Optional[int], num_threads: int,
              gsm8k_data_path: Optional[str] = None,
              math_data_path: Optional[str] = None,
-             request_rate: Optional[float] = None) -> Dict:
-    sampler = _make_sampler(task, base_url, model)
+             request_rate: Optional[float] = None,
+             num_output_blocks: int = 0,
+             block_size: int = 32) -> Dict:
+    sampler = _make_sampler(task, base_url, model,
+                            num_output_blocks=num_output_blocks,
+                            block_size=block_size)
     if request_rate is not None:
         sampler = RateLimitedSampler(sampler, request_rate)
 
@@ -720,6 +731,9 @@ def summarize_latency_metrics(
 
     ttfb_ms = _values(request_records, "ttfb_ms")
     tpob_ms = _values(request_records, "tpob_ms")
+    sched_wait_ms = _values(request_records, "sched_wait_ms")
+    decode_delay_ms = _values(request_records, "decode_delay_ms")
+    first_unmask_gap_ms = _values(request_records, "first_unmask_gap_ms")
     avg_prefill_req_ms = _weighted_batch_mean(
         batch_records, "prefill", "duration_ms", "num_reqs"
     )
@@ -740,6 +754,18 @@ def summarize_latency_metrics(
 
     return {
         "n_request_records": len(request_records),
+        "mean_sched_wait_ms": float(np.mean(sched_wait_ms)) if sched_wait_ms else None,
+        "p50_sched_wait_ms": _percentile(sched_wait_ms, 50),
+        "p95_sched_wait_ms": _percentile(sched_wait_ms, 95),
+        "p99_sched_wait_ms": _percentile(sched_wait_ms, 99),
+        "mean_decode_delay_ms": float(np.mean(decode_delay_ms)) if decode_delay_ms else None,
+        "p50_decode_delay_ms": _percentile(decode_delay_ms, 50),
+        "p95_decode_delay_ms": _percentile(decode_delay_ms, 95),
+        "p99_decode_delay_ms": _percentile(decode_delay_ms, 99),
+        "mean_first_unmask_gap_ms": float(np.mean(first_unmask_gap_ms)) if first_unmask_gap_ms else None,
+        "p50_first_unmask_gap_ms": _percentile(first_unmask_gap_ms, 50),
+        "p95_first_unmask_gap_ms": _percentile(first_unmask_gap_ms, 95),
+        "p99_first_unmask_gap_ms": _percentile(first_unmask_gap_ms, 99),
         "mean_ttfb_ms": float(np.mean(ttfb_ms)) if ttfb_ms else None,
         "p50_ttfb_ms": _percentile(ttfb_ms, 50),
         "p95_ttfb_ms": _percentile(ttfb_ms, 95),
@@ -862,6 +888,134 @@ def plot_forward_latency(
     fig2.savefig(out_path2, dpi=150, bbox_inches="tight")
     print(f"[plot] saved → {out_path2}")
     plt.close(fig2)
+
+
+def plot_context_length_distribution(
+    latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]],
+    model_name: str,
+    output_dir: str,
+):
+    """Plot histogram of input context lengths per request for each task."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    tasks = [
+        task
+        for task, data in latency_data.items()
+        if any("input_len" in r for r in data.get("request", []))
+    ]
+    if not tasks:
+        print("[plot] no input_len data in request latency log")
+        return
+
+    colors = {"gsm8k": "#4C72B0", "humaneval": "#DD8452", "math": "#55A868"}
+    model_tag = model_name.replace("/", "_")
+
+    fig, axes = plt.subplots(1, len(tasks), figsize=(5 * len(tasks), 4))
+    if len(tasks) == 1:
+        axes = [axes]
+
+    for ax, task in zip(axes, tasks):
+        input_lens = [
+            r["input_len"]
+            for r in latency_data[task]["request"]
+            if "input_len" in r
+        ]
+        color = colors.get(task, "#777")
+        mean_val = float(np.mean(input_lens))
+        p50 = float(np.percentile(input_lens, 50))
+
+        ax.hist(input_lens, bins=30, color=color, edgecolor="white", linewidth=0.4)
+        ax.axvline(mean_val, color="red", linestyle="--", linewidth=1.2,
+                   label=f"mean={mean_val:.0f}")
+        ax.axvline(p50, color="orange", linestyle=":", linewidth=1.2,
+                   label=f"p50={p50:.0f}")
+        ax.set_title(f"{task.upper()} — Context length distribution",
+                     fontsize=12, fontweight="bold")
+        ax.set_xlabel("Input token count", fontsize=10)
+        ax.set_ylabel("Count", fontsize=10)
+        ax.legend(fontsize=8)
+        ax.text(
+            0.97, 0.97,
+            f"n={len(input_lens)}\nmean={mean_val:.0f}\n"
+            f"p50={p50:.0f}\n"
+            f"min={min(input_lens)}\nmax={max(input_lens)}",
+            transform=ax.transAxes, fontsize=8, va="top", ha="right",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
+        )
+
+    fig.suptitle(f"Request context length distribution — {model_name}", fontsize=13)
+    fig.tight_layout()
+    out_path = Path(output_dir) / f"context_length_{model_tag}.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"[plot] saved → {out_path}")
+    plt.close(fig)
+
+
+def plot_scheduling_delays(
+    latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]],
+    model_name: str,
+    output_dir: str,
+):
+    """Histogram of sched_wait_ms and decode_delay_ms per task."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    tasks = list(latency_data.keys())
+    colors = {"gsm8k": "#4C72B0", "humaneval": "#DD8452", "math": "#55A868"}
+    model_tag = model_name.replace("/", "_")
+
+    metrics = [
+        ("sched_wait_ms",      "Scheduling wait (ms)",      "Scheduling wait — queue entry → first forward"),
+        ("first_unmask_gap_ms", "Prefill→unmask gap (ms)",  "Prefill→first unmask gap — last prefill forward → first unmask batch"),
+        ("decode_delay_ms",    "Inter-block delay (ms)",    "Decode delay — block ready → next batch"),
+    ]
+
+    for field, xlabel, suptitle in metrics:
+        task_data = {
+            task: _values(latency_data[task]["request"], field)
+            for task in tasks
+        }
+        task_data = {t: v for t, v in task_data.items() if v}
+        if not task_data:
+            print(f"[plot] no {field} data — skipping")
+            continue
+
+        n = len(task_data)
+        fig, axes = plt.subplots(1, n, figsize=(5 * n, 4))
+        if n == 1:
+            axes = [axes]
+
+        for ax, (task, vals) in zip(axes, task_data.items()):
+            arr = np.array(vals)
+            color = colors.get(task, "#777")
+            mean_v = float(np.mean(arr))
+            p50   = float(np.percentile(arr, 50))
+            p95   = float(np.percentile(arr, 95))
+            p99   = float(np.percentile(arr, 99))
+
+            ax.hist(arr, bins=40, color=color, edgecolor="white", linewidth=0.4)
+            ax.axvline(mean_v, color="red",    linestyle="--", linewidth=1.2, label=f"mean={mean_v:.1f}")
+            ax.axvline(p50,   color="orange",  linestyle=":",  linewidth=1.2, label=f"p50={p50:.1f}")
+            ax.axvline(p95,   color="purple",  linestyle="-.", linewidth=1.2, label=f"p95={p95:.1f}")
+
+            ax.set_title(f"{task.upper()}", fontsize=12, fontweight="bold")
+            ax.set_xlabel(xlabel, fontsize=10)
+            ax.set_ylabel("Count", fontsize=10)
+            ax.legend(fontsize=8)
+            ax.text(
+                0.97, 0.97,
+                f"n={len(arr)}\nmean={mean_v:.1f}\np50={p50:.1f}\np95={p95:.1f}\np99={p99:.1f}",
+                transform=ax.transAxes, fontsize=8, va="top", ha="right",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
+            )
+
+        fig.suptitle(f"{suptitle} — {model_name}", fontsize=13)
+        fig.tight_layout()
+        out_path = Path(output_dir) / f"{field}_{model_tag}.png"
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        print(f"[plot] saved → {out_path}")
+        plt.close(fig)
 
 
 def plot_latency_metrics(
@@ -1155,6 +1309,8 @@ def main():
                         help="DLM step/request/batch 로그를 수집하고 그래프를 생성")
     parser.add_argument("--warmup", type=int, default=4,
                         help="벤치마크 전 Triton 커널 컴파일을 위해 보낼 더미 요청 수 (0 = 비활성)")
+    parser.add_argument("--num-output-blocks", type=int, default=0,
+                        help="생성할 block 수 고정 (0=비활성, EOS 무시하고 정확히 N블록 생성)")
 
     args = parser.parse_args()
 
@@ -1219,6 +1375,8 @@ def main():
                 gsm8k_data_path=args.gsm8k_data_path,
                 math_data_path=args.math_data_path,
                 request_rate=args.request_rate,
+                num_output_blocks=args.num_output_blocks,
+                block_size=args.block_size,
             )
             all_results[task] = metrics
 
@@ -1287,6 +1445,12 @@ def main():
             if args.log:
                 print(
                     f"[{task}] latency stats: "
+                    f"mean_sched_wait_ms={latency_summary.get('mean_sched_wait_ms')}  "
+                    f"p95_sched_wait_ms={latency_summary.get('p95_sched_wait_ms')}  "
+                    f"mean_decode_delay_ms={latency_summary.get('mean_decode_delay_ms')}  "
+                    f"p95_decode_delay_ms={latency_summary.get('p95_decode_delay_ms')}  "
+                    f"mean_first_unmask_gap_ms={latency_summary.get('mean_first_unmask_gap_ms')}  "
+                    f"p95_first_unmask_gap_ms={latency_summary.get('p95_first_unmask_gap_ms')}  "
                     f"mean_ttfb_ms={latency_summary.get('mean_ttfb_ms')}  "
                     f"p95_ttfb_ms={latency_summary.get('p95_ttfb_ms')}  "
                     f"p99_ttfb_ms={latency_summary.get('p99_ttfb_ms')}  "
@@ -1369,6 +1533,8 @@ def main():
             plot_step_distributions(step_data, block_size=block_size,
                                     model_name=model, output_dir=args.output_dir)
             plot_forward_latency(step_data, model_name=model, output_dir=args.output_dir)
+            plot_context_length_distribution(latency_data, model_name=model, output_dir=args.output_dir)
+            plot_scheduling_delays(latency_data, model_name=model, output_dir=args.output_dir)
             plot_latency_metrics(latency_data, model_name=model, output_dir=args.output_dir)
 
     finally:

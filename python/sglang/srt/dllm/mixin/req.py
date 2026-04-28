@@ -38,6 +38,13 @@ class ReqDllmMixin:
         self.dllm_active_start = 0
         self.dllm_active_block_steps = 0
         self.dllm_pending_kv_save = False
+        # decode delay: time from block completion → next block first enters a batch
+        self.dllm_block_ready_time: Optional[float] = None
+        self.dllm_decode_delay_sum: float = 0.0
+        self.dllm_decode_delay_count: int = 0
+        # prefill→first_unmask gap: time from last prefill forward → first unmask batch
+        self.dllm_prefill_end_time: Optional[float] = None
+        self.dllm_first_unmask_gap: Optional[float] = None
 
         if self.dllm_config is not None:
             if len(self.origin_input_ids) < self.dllm_config.block_size:
@@ -74,6 +81,12 @@ class ReqDllmMixin:
         if self.dllm_tpob_count == 0:
             return None
         return self.dllm_tpob_sum / self.dllm_tpob_count
+
+    def get_dllm_decode_delay(self: Req) -> Optional[float]:
+        """Mean inter-block scheduling delay (block ready → block enters next batch)."""
+        if self.dllm_decode_delay_count == 0:
+            return None
+        return self.dllm_decode_delay_sum / self.dllm_decode_delay_count
 
     def is_dllm_prefill(self: Req) -> bool:
         return self.dllm_phase in [
