@@ -12,8 +12,8 @@ if TYPE_CHECKING:
 class DllmReqPhase(str, enum.Enum):
     STAGING_PREFILL = "staging_prefill"
     STAGING_DECODE = "staging_decode"
-    INCOMING_PREFILL = "incoming_prefill"
-    INCOMING_DECODE = "incoming_decode"
+    QUEUING_PREFILL = "queuing_prefill"
+    QUEUING_DECODE = "queuing_decode"
 
 
 class ReqDllmMixin:
@@ -48,9 +48,9 @@ class ReqDllmMixin:
 
         if self.dllm_config is not None:
             if len(self.origin_input_ids) < self.dllm_config.block_size:
-                self.dllm_phase = DllmReqPhase.INCOMING_DECODE
+                self.dllm_phase = DllmReqPhase.QUEUING_DECODE
             else:
-                self.dllm_phase = DllmReqPhase.INCOMING_PREFILL
+                self.dllm_phase = DllmReqPhase.QUEUING_PREFILL
 
     def is_dllm(self: Req) -> bool:
         return self.dllm_config is not None
@@ -91,7 +91,7 @@ class ReqDllmMixin:
     def is_dllm_prefill(self: Req) -> bool:
         return self.dllm_phase in [
             DllmReqPhase.STAGING_PREFILL,
-            DllmReqPhase.INCOMING_PREFILL,
+            DllmReqPhase.QUEUING_PREFILL,
         ]
 
     def has_dllm_active_block(self: Req) -> bool:
@@ -113,19 +113,33 @@ class ReqDllmMixin:
             self.dllm_phase = DllmReqPhase.STAGING_DECODE
             return
 
+        # No active block: either a brand-new request or a completed block.
+        # _init_fill_ids_for_dllm() sets dllm_block_offset=0 only on the very
+        # first call (when fill_ids is still empty).  After any completed block,
+        # dllm_block_offset is already > 0.
         prefix_length = len(self.prefix_indices)
         min_required_length = prefix_length + self.dllm_config.block_size
 
         if len(self.fill_ids) < min_required_length:
-            # still incoming stage
             return
 
         input_block = self.fill_ids[prefix_length:min_required_length]
         is_prefill_phase = self.dllm_config.mask_id not in input_block
 
         if is_prefill_phase:
-            self.dllm_phase = DllmReqPhase.STAGING_PREFILL
+            # dllm_block_offset==0 means fill_ids was empty before this call →
+            # brand-new request entering the system for the first time.
+            # dllm_block_offset>0 means at least one block already completed →
+            # continuation prefill, keep staging priority.
+            if self.dllm_block_offset == 0:
+                self.dllm_phase = DllmReqPhase.QUEUING_PREFILL
+            else:
+                self.dllm_phase = DllmReqPhase.STAGING_PREFILL
         else:
+            # Block contains masks → kv_save-completed decode returning from staging.
+            # Must stay STAGING_DECODE so it goes through process_dllm_staging_reqs,
+            # which preserves prefix_indices without tree_cache re-matching.
+            # (QUEUING_DECODE is only set in init_diffusion_llm for brand-new short inputs.)
             self.dllm_phase = DllmReqPhase.STAGING_DECODE
 
     def _init_fill_ids_for_dllm(self: Req):

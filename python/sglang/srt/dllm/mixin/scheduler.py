@@ -21,11 +21,15 @@ if TYPE_CHECKING:
 
 class SchedulerDllmMixin:
     def init_diffusion_llm(self: Scheduler):
-        self.dllm_config = (
-            DllmConfig.from_server_args(self.server_args)
-            if self.server_args.dllm_algorithm is not None
-            else None
-        )
+        # dllm_config was already created in init_model_config() so that
+        # admission_window could bump max_running_requests before the token
+        # pool was allocated.  Fall back to creating it here only if absent.
+        if not hasattr(self, "dllm_config"):
+            self.dllm_config = (
+                DllmConfig.from_server_args(self.server_args)
+                if self.server_args.dllm_algorithm is not None
+                else None
+            )
         self.dllm_manager = DllmManager(dllm_config=self.dllm_config)
         self.dllm_batch_seq = 0
         self.dllm_last_batch_phase = None
@@ -389,12 +393,12 @@ class SchedulerDllmMixin:
             per_req_block_steps = per_req_block_steps[:num_reqs]
 
         num_initial_prefill_reqs = per_req_phase.count(
-            DllmReqPhase.INCOMING_PREFILL.value
+            DllmReqPhase.QUEUING_PREFILL.value
         )
         num_staging_prefill_reqs = per_req_phase.count(
             DllmReqPhase.STAGING_PREFILL.value
         )
-        num_initial_decode_reqs = per_req_phase.count(DllmReqPhase.INCOMING_DECODE.value)
+        num_initial_decode_reqs = per_req_phase.count(DllmReqPhase.QUEUING_DECODE.value)
         num_staging_decode_reqs = per_req_phase.count(DllmReqPhase.STAGING_DECODE.value)
         num_masked_reqs = sum(1 for value in per_req_has_mask if value)
         num_unmasked_reqs = sum(1 for value in per_req_has_mask if not value)
@@ -439,6 +443,9 @@ class SchedulerDllmMixin:
             if self.dllm_decode_batch_count > 0
             else None
         )
+        dllm_waiting_queue_size = len(self.dllm_manager.waiting_queue)
+        dllm_staging_queue_size = len(self.dllm_manager.staging_queue)
+        dllm_admitted_reqs = dllm_waiting_queue_size + dllm_staging_queue_size
 
         record = {
             "seq": getattr(batch, "dllm_batch_seq", None),
@@ -464,6 +471,11 @@ class SchedulerDllmMixin:
             "num_masked_reqs": num_masked_reqs,
             "num_unmasked_reqs": num_unmasked_reqs,
             "is_mixed_mask_batch": is_mixed_mask_batch,
+            "dllm_admission_window": self.dllm_config.admission_window,
+            "dllm_max_running_requests": self.dllm_config.max_running_requests,
+            "dllm_waiting_queue_size": dllm_waiting_queue_size,
+            "dllm_staging_queue_size": dllm_staging_queue_size,
+            "dllm_admitted_reqs": dllm_admitted_reqs,
             "duration_s": duration_s,
             "duration_ms": duration_s * 1000,
             "forward_result_s": forward_result_s,
@@ -499,7 +511,7 @@ class SchedulerDllmMixin:
 
     def _fetch_waiting_reqs(self: Scheduler):
         # Calculate how many requests can be added to DLLM manager
-        max_dllm_capacity = self.dllm_config.max_running_requests - len(
+        max_dllm_capacity = self.dllm_config.admission_window - len(
             self.dllm_manager.waiting_queue
         )
         num_requests_to_add = min(max_dllm_capacity, len(self.waiting_queue))
@@ -554,7 +566,7 @@ class SchedulerDllmMixin:
                 adder,
                 prefill_reqs,
                 DllmReqPhase.STAGING_PREFILL,
-                DllmReqPhase.INCOMING_PREFILL,
+                DllmReqPhase.QUEUING_PREFILL,
             )
 
         if prefill_result == AddReqResult.CONTINUE:
@@ -569,7 +581,7 @@ class SchedulerDllmMixin:
                     adder,
                     decode_reqs,
                     DllmReqPhase.STAGING_DECODE,
-                    DllmReqPhase.INCOMING_DECODE,
+                    DllmReqPhase.QUEUING_DECODE,
                 )
 
         return forward_mode

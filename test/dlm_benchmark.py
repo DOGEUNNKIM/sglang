@@ -672,9 +672,9 @@ def _weighted_batch_mean(
 
 
 REQ_PHASE_LABELS = {
-    "incoming_prefill": "initial prefill",
+    "queuing_prefill": "queuing prefill",
     "staging_prefill": "staging prefill",
-    "incoming_decode": "initial decode",
+    "queuing_decode": "queuing decode",
     "staging_decode": "staging decode",
 }
 
@@ -716,7 +716,7 @@ def _batch_visual_phase(record: Dict[str, Any]) -> str:
         return "mixed"
     if has_mask and any(has_mask):
         return "decode"
-    if "incoming_prefill" in phases:
+    if "queuing_prefill" in phases:
         return "initial_prefill"
     if "staging_prefill" in phases:
         return "staging_prefill"
@@ -749,6 +749,10 @@ def summarize_latency_metrics(
     avg_actual_decode_block_ms = _weighted_mean_by_count(
         batch_records, "duration_ms", "num_output_blocks"
     )
+    dllm_admitted_reqs = _values(batch_records, "dllm_admitted_reqs")
+    dllm_waiting_queue_size = _values(batch_records, "dllm_waiting_queue_size")
+    dllm_staging_queue_size = _values(batch_records, "dllm_staging_queue_size")
+    dllm_admission_window = _values(batch_records, "dllm_admission_window")
     phase_sequence = [record.get("phase") for record in batch_records]
     req_phase_counts = _count_per_req_phases(batch_records)
 
@@ -780,6 +784,31 @@ def summarize_latency_metrics(
         "avg_initial_prefill_req_ms": avg_initial_prefill_req_ms,
         "avg_staging_prefill_req_ms": avg_staging_prefill_req_ms,
         "avg_actual_decode_block_ms": avg_actual_decode_block_ms,
+        "dllm_admission_window": (
+            int(max(dllm_admission_window)) if dllm_admission_window else None
+        ),
+        "mean_dllm_admitted_reqs": (
+            float(np.mean(dllm_admitted_reqs)) if dllm_admitted_reqs else None
+        ),
+        "max_dllm_admitted_reqs": (
+            int(max(dllm_admitted_reqs)) if dllm_admitted_reqs else None
+        ),
+        "mean_dllm_waiting_queue_size": (
+            float(np.mean(dllm_waiting_queue_size))
+            if dllm_waiting_queue_size
+            else None
+        ),
+        "max_dllm_waiting_queue_size": (
+            int(max(dllm_waiting_queue_size)) if dllm_waiting_queue_size else None
+        ),
+        "mean_dllm_staging_queue_size": (
+            float(np.mean(dllm_staging_queue_size))
+            if dllm_staging_queue_size
+            else None
+        ),
+        "max_dllm_staging_queue_size": (
+            int(max(dllm_staging_queue_size)) if dllm_staging_queue_size else None
+        ),
         "request_phase_counts": req_phase_counts,
         "mixed_mask_batches": sum(
             1 for record in batch_records if record.get("is_mixed_mask_batch")
@@ -1017,6 +1046,60 @@ def plot_scheduling_delays(
         print(f"[plot] saved → {out_path}")
         plt.close(fig)
 
+    # Batch-level DLLM admission queue occupancy.
+    field = "dllm_waiting_queue_size"
+    task_data = {
+        task: _values(latency_data[task]["batch"], field)
+        for task in tasks
+    }
+    task_data = {t: v for t, v in task_data.items() if v}
+    if not task_data:
+        print(f"[plot] no {field} data — skipping")
+        return
+
+    n = len(task_data)
+    fig, axes = plt.subplots(1, n, figsize=(5 * n, 4))
+    if n == 1:
+        axes = [axes]
+
+    for ax, (task, vals) in zip(axes, task_data.items()):
+        arr = np.array(vals)
+        color = colors.get(task, "#777")
+        mean_v = float(np.mean(arr))
+        p50 = float(np.percentile(arr, 50))
+        p95 = float(np.percentile(arr, 95))
+        max_v = int(max(arr))
+        bins = range(0, max_v + 2)
+
+        ax.hist(arr, bins=bins, color=color, edgecolor="white", linewidth=0.4)
+        ax.axvline(mean_v, color="red", linestyle="--", linewidth=1.2,
+                   label=f"mean={mean_v:.1f}")
+        ax.axvline(p50, color="orange", linestyle=":", linewidth=1.2,
+                   label=f"p50={p50:.1f}")
+        ax.axvline(p95, color="purple", linestyle="-.", linewidth=1.2,
+                   label=f"p95={p95:.1f}")
+        ax.set_title(f"{task.upper()}", fontsize=12, fontweight="bold")
+        ax.set_xlabel("DLLM waiting queue size per forward", fontsize=10)
+        ax.set_ylabel("Forward batches", fontsize=10)
+        ax.legend(fontsize=8)
+        ax.text(
+            0.97,
+            0.97,
+            f"n={len(arr)}\nmean={mean_v:.1f}\np50={p50:.1f}\np95={p95:.1f}\nmax={max_v}",
+            transform=ax.transAxes,
+            fontsize=8,
+            va="top",
+            ha="right",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
+        )
+
+    fig.suptitle(f"DLLM waiting queue occupancy per forward — {model_name}", fontsize=13)
+    fig.tight_layout()
+    out_path = Path(output_dir) / f"{field}_{model_tag}.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"[plot] saved → {out_path}")
+    plt.close(fig)
+
 
 def plot_latency_metrics(
     latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]],
@@ -1210,15 +1293,15 @@ def plot_latency_metrics(
 
     # ── Per-batch request phase composition ───────────────────────────
     phase_keys = [
-        "incoming_prefill",
+        "queuing_prefill",
         "staging_prefill",
-        "incoming_decode",
+        "queuing_decode",
         "staging_decode",
     ]
     phase_colors = {
-        "incoming_prefill": "#74A9CF",
+        "queuing_prefill": "#74A9CF",
         "staging_prefill": "#2C7BB6",
-        "incoming_decode": "#Fdae61",
+        "queuing_decode": "#Fdae61",
         "staging_decode": "#D7191C",
     }
     fig4, axes4 = plt.subplots(
@@ -1461,6 +1544,13 @@ def main():
                     f"avg_decode_block_ms={latency_summary.get('avg_decode_block_ms')}  "
                     f"initial_prefill_req_ms={latency_summary.get('avg_initial_prefill_req_ms')}  "
                     f"staging_prefill_req_ms={latency_summary.get('avg_staging_prefill_req_ms')}  "
+                    f"dllm_admission_window={latency_summary.get('dllm_admission_window')}  "
+                    f"mean_dllm_admitted_reqs={latency_summary.get('mean_dllm_admitted_reqs')}  "
+                    f"max_dllm_admitted_reqs={latency_summary.get('max_dllm_admitted_reqs')}  "
+                    f"mean_dllm_waiting_queue_size={latency_summary.get('mean_dllm_waiting_queue_size')}  "
+                    f"max_dllm_waiting_queue_size={latency_summary.get('max_dllm_waiting_queue_size')}  "
+                    f"mean_dllm_staging_queue_size={latency_summary.get('mean_dllm_staging_queue_size')}  "
+                    f"max_dllm_staging_queue_size={latency_summary.get('max_dllm_staging_queue_size')}  "
                     f"mixed_batches={latency_summary.get('mixed_mask_batches')}  "
                     f"mixed_prefill_decode_batches={latency_summary.get('mixed_prefill_decode_batches')}  "
                     f"phase_switches={latency_summary.get('phase_switches')}"
@@ -1536,7 +1626,7 @@ def main():
             plot_context_length_distribution(latency_data, model_name=model, output_dir=args.output_dir)
             plot_scheduling_delays(latency_data, model_name=model, output_dir=args.output_dir)
             # takes too long time to make figure
-            #plot_latency_metrics(latency_data, model_name=model, output_dir=args.output_dir)
+            # plot_latency_metrics(latency_data, model_name=model, output_dir=args.output_dir)
 
     finally:
         if server_proc is not None:

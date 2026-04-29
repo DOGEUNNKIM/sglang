@@ -475,24 +475,27 @@ class Scheduler(
 
     def init_model_config(self):
         self.model_config = ModelConfig.from_server_args(self.server_args)
-        if _is_npu:
-            # make sure the page size is not larger than block_size and chunked_prefill_size on NPU backend
-            # the npu backend request the defined page size to be no larger than block_size and chunked_prefill_size
-            from sglang.srt.dllm.config import DllmConfig
 
-            self.dllm_config = (  # For diffusion LLM
-                DllmConfig.from_server_args(self.server_args)
-                if self.server_args.dllm_algorithm is not None
-                else None
-            )
-            if self.dllm_config:
-                if self.dllm_config.block_size < self.page_size:
-                    logger.warning(
-                        "WARNING: "
-                        f"The page size {self.page_size} should not be larger than dllm block size {self.dllm_config.block_size}."
-                        f"Page size now falls back to {self.dllm_config.block_size}"
-                    )
-                    self.page_size = self.dllm_config.block_size
+        # Create DllmConfig early so that admission_window can bump
+        # server_args.max_running_requests BEFORE init_cache_with_memory_pool()
+        # sizes req_to_token_pool.  init_diffusion_llm() will reuse this object.
+        from sglang.srt.dllm.config import DllmConfig
+
+        self.dllm_config = (
+            DllmConfig.from_server_args(self.server_args)
+            if self.server_args.dllm_algorithm is not None
+            else None
+        )
+
+        if _is_npu and self.dllm_config:
+            # make sure the page size is not larger than block_size on NPU backend
+            if self.dllm_config.block_size < self.page_size:
+                logger.warning(
+                    "WARNING: "
+                    f"The page size {self.page_size} should not be larger than dllm block size {self.dllm_config.block_size}."
+                    f"Page size now falls back to {self.dllm_config.block_size}"
+                )
+                self.page_size = self.dllm_config.block_size
 
     def init_ipc_channels(self, port_args: PortArgs):
         context = zmq.Context(2)

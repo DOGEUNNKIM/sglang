@@ -195,6 +195,22 @@ class ModelRunnerKVCacheMixin:
         """Initialize the memory pools."""
         max_num_reqs = self.max_running_requests
 
+        # DLLM: waiting_queue (≤ admission_window) and staging_queue
+        # (≤ max_running_requests) both hold pool slots simultaneously, so the
+        # pool must cover their combined maximum.  Do NOT touch max_running_requests
+        # itself — that drives CUDA-graph batch sizes.
+        if self.server_args.dllm_algorithm_config is not None:
+            try:
+                import yaml
+
+                with open(self.server_args.dllm_algorithm_config) as _f:
+                    _cfg = yaml.safe_load(_f) or {}
+                _admission_window = int(_cfg.get("dllm_admission_window", max_num_reqs))
+                _admission_window = max(_admission_window, max_num_reqs)
+                max_num_reqs = _admission_window + self.max_running_requests
+            except Exception:
+                pass
+
         # Initialize req_to_token_pool
         if self.req_to_token_pool is None:
             # FIXME(lsyin): this is the temporary fix for the context length issue when using speculative decoding

@@ -12,12 +12,14 @@ class DllmConfig:
         block_size: int,
         mask_id: int,
         max_running_requests: int,
+        admission_window: int | None = None,
     ):
         self.algorithm = algorithm
         self.algorithm_config = algorithm_config
         self.block_size = block_size
         self.mask_id = mask_id
         self.max_running_requests = max_running_requests
+        self.admission_window = admission_window or max_running_requests
 
     @staticmethod
     def from_server_args(
@@ -61,10 +63,16 @@ class DllmConfig:
                     "`pip install pyyaml`"
                 )
             with open(server_args.dllm_algorithm_config, "r") as f:
-                algorithm_config = yaml.safe_load(f)
+                algorithm_config = yaml.safe_load(f) or {}
 
             # Parse common algorithm configurations
             block_size = algorithm_config.get("block_size", block_size)
+
+        admission_window = int(
+            algorithm_config.get("dllm_admission_window", max_running_requests)
+        )
+        if admission_window < max_running_requests:
+            admission_window = max_running_requests
 
         return DllmConfig(
             algorithm=server_args.dllm_algorithm,
@@ -72,4 +80,5 @@ class DllmConfig:
             block_size=block_size,
             mask_id=mask_id,
             max_running_requests=max_running_requests,
+            admission_window=admission_window,
         )
