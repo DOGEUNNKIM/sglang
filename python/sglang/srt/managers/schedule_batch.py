@@ -1017,6 +1017,8 @@ class Req(ReqDllmMixin):
 
             if self.is_dllm():
                 self._update_block_offset_for_dllm()
+                self._pad_fill_ids_for_dllm_block()
+                self.determine_dllm_phase()
 
         if (
             self.is_retracted

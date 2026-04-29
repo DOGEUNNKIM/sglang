@@ -71,8 +71,8 @@ class DllmConfig:
         admission_window = int(
             algorithm_config.get("dllm_admission_window", max_running_requests)
         )
-        if admission_window < max_running_requests:
-            admission_window = max_running_requests
+        #if admission_window < max_running_requests:
+        #    admission_window = max_running_requests
 
         return DllmConfig(
             algorithm=server_args.dllm_algorithm,

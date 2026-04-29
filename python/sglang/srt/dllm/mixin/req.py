@@ -155,11 +155,20 @@ class ReqDllmMixin:
             if not self.fill_ids
             else self.dllm_block_offset + self.dllm_config.block_size
         )
-        self.fill_ids = (
-            self.origin_input_ids
-            + self.output_ids
-            + [self.dllm_config.mask_id] * self.dllm_config.block_size
-        )
+        self.fill_ids = self.origin_input_ids + self.output_ids
+        self._pad_fill_ids_for_dllm_block()
+
+    def _pad_fill_ids_for_dllm_block(self: Req):
+        block_size = self.dllm_config.block_size
+        prefix_length = len(self.prefix_indices)
+        next_block_end = prefix_length + block_size
+
+        # Add masks only for the block that is about to be processed.  Earlier
+        # pure-prefill blocks should not carry placeholder decode masks.
+        if len(self.fill_ids) < next_block_end:
+            self.fill_ids = self.fill_ids + [self.dllm_config.mask_id] * (
+                next_block_end - len(self.fill_ids)
+            )
 
     def _update_block_offset_for_dllm(self):
         prefix_len = len(self.prefix_indices)
