@@ -15,6 +15,11 @@ BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 THRESHOLD="${THRESHOLD:-0.95}"
 NUM_THREADS="${NUM_THREADS:-200}"   ######################## DLLM max concurrent request
 DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-200}" ###### DLLM_WAITING_QUEUE
+SLO_MULTIPLIER="${SLO_MULTIPLIER:-}"         # e.g. 5.0  → deadline = multiplier × ideal; empty = LST disabled
+FORWARD_TIME_S="${FORWARD_TIME_S:-0.030}"          # shared fallback (s)
+PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"  # override prefill fwd time (s)
+DECODE_FORWARD_TIME_S="${DECODE_FORWARD_TIME_S:-}"    # override decode fwd time (s)
+EXPECTED_UNMASK_PER_FORWARD="${EXPECTED_UNMASK_PER_FORWARD:-}"  # avg tokens unmasked/fwd
 CONFIG_PATH="${CONFIG_PATH:-/tmp/dlm_algo_config.yaml}"
 STEP_LOG_FILE="${STEP_LOG_FILE:-/tmp/dlm_step_stats.jsonl}"
 REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-/tmp/dlm_request_latency.jsonl}"
@@ -22,14 +27,84 @@ BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-/tmp/dlm_batch_latency.jsonl}"
 
 SERVER_PID=""
 
+# Ideal baseline TTFB latencies (ms) per task — used with SLO_MULTIPLIER.
+# Source: empirical single-request measurements.
+_ideal_ttfb_ms() {
+    case "${1}" in
+        gsm8k)     echo "417.2" ;;
+        humaneval) echo "312.9" ;;
+        math)      echo "404.5" ;;
+        *)         echo "417.2" ;;   # conservative fallback
+    esac
+}
+
+# Default expected unmasked tokens per forward, derived from empirical ideal TPOB.
+# The effective ideal TPOB is computed as:
+#   ceil(block_size / expected_unmask_per_forward) * decode_forward_time_s
+_default_expected_unmask_per_forward() {
+    case "${1}" in
+        gsm8k)     echo "2.666666667" ;;  # 32 / ceil(348.5 ms / 30 ms) = 32 / 12
+        humaneval) echo "5.333333334" ;;  # 32 / ceil(158.8 ms / 30 ms) = 32 / 6
+        math)      echo "2.133333334" ;;  # 32 / ceil(436.5 ms / 30 ms) = 32 / 15
+        *)         echo "2.666666667" ;;
+    esac
+}
+
+# Compute absolute SLO values and task-specific expected_unmask_per_forward.
+# Returns "ttfb_s tpob_s unmask_per_fwd" on stdout, or "" if LST is disabled.
+#
+# TPOB SLO is derived from the same decode-step estimate used by the scheduler:
+#   decode_steps = ceil(block_size / expected_unmask_per_forward)
+#   ideal_tpob_s = decode_steps * decode_forward_time_s
+_compute_task_slo() {
+    local task="${1}" multiplier="${2}"
+    if [[ -z "${multiplier}" ]]; then
+        echo ""
+        return
+    fi
+    # Resolve effective decode forward time (may be overridden per-experiment)
+    local _decode_fwd_s="${DECODE_FORWARD_TIME_S:-${FORWARD_TIME_S}}"
+    local _unmask_per_fwd="${EXPECTED_UNMASK_PER_FORWARD:-$(_default_expected_unmask_per_forward "${task}")}"
+    python3 -c "
+import math
+ttfb_ms     = float('$(_ideal_ttfb_ms "${task}")')
+block_size  = int('${BLOCK_SIZE}')
+decode_fwd_s = float('${_decode_fwd_s}')
+unmask_per_fwd = float('${_unmask_per_fwd}')
+m = float('${multiplier}')
+
+decode_steps = math.ceil(block_size / unmask_per_fwd)
+ideal_tpob_s = decode_steps * decode_fwd_s
+
+print(f'{ttfb_ms*m/1000:.4f} {ideal_tpob_s*m:.4f} {unmask_per_fwd:.4f}')
+"
+}
+
+# write_dllm_config TTFB_SLO_S TPOB_SLO_S UNMASK_PER_FWD
+# All args are optional (empty = omit field from YAML).
+# UNMASK_PER_FWD: task-specific value computed by _compute_task_slo;
+#   overridden by EXPECTED_UNMASK_PER_FORWARD env var if set manually.
 write_dllm_config() {
+    local _ttfb_slo="${1:-}"
+    local _tpob_slo="${2:-}"
+    # Manual env var takes priority over the task-specific computed value
+    local _unmask_per_fwd="${EXPECTED_UNMASK_PER_FORWARD:-${3:-}}"
+
     cat > "${CONFIG_PATH}" <<EOF
 threshold: ${THRESHOLD}
 dllm_admission_window: ${DLLM_ADMISSION_WINDOW}
+forward_time_s: ${FORWARD_TIME_S}
 step_log_file: ${STEP_LOG_FILE}
 request_latency_log_file: ${REQUEST_LATENCY_LOG_FILE}
 batch_latency_log_file: ${BATCH_LATENCY_LOG_FILE}
 EOF
+    # LST SLO fields — only written when set (empty = disabled)
+    [[ -n "${_ttfb_slo}" ]]              && echo "ttfb_slo: ${_ttfb_slo}"                               >> "${CONFIG_PATH}"
+    [[ -n "${_tpob_slo}" ]]              && echo "tpob_slo: ${_tpob_slo}"                               >> "${CONFIG_PATH}"
+    [[ -n "${_unmask_per_fwd}" ]]        && echo "expected_unmask_per_forward: ${_unmask_per_fwd}"       >> "${CONFIG_PATH}"
+    [[ -n "${PREFILL_FORWARD_TIME_S}" ]] && echo "prefill_forward_time_s: ${PREFILL_FORWARD_TIME_S}"     >> "${CONFIG_PATH}"
+    [[ -n "${DECODE_FORWARD_TIME_S}" ]]  && echo "decode_forward_time_s: ${DECODE_FORWARD_TIME_S}"       >> "${CONFIG_PATH}"
+    return 0
 }
 
 wait_server_ready() {
@@ -66,7 +141,13 @@ for RATE in "${REQUEST_RATES[@]}"; do
         echo "A fresh server will be started for this task."
         echo "============================================================"
 
-        write_dllm_config
+        _slo_vals=$(_compute_task_slo "${TASK}" "${SLO_MULTIPLIER}")
+        read -r _task_ttfb_slo _task_tpob_slo _task_unmask_per_fwd \
+            <<< "${_slo_vals}"
+        if [[ -n "${_slo_vals}" ]]; then
+            echo "[slo] task=${TASK}  ttfb_slo=${_task_ttfb_slo}s  tpob_slo=${_task_tpob_slo}s  unmask/fwd=${_task_unmask_per_fwd}  (${SLO_MULTIPLIER}× ideal)"
+        fi
+        write_dllm_config "${_task_ttfb_slo:-}" "${_task_tpob_slo:-}" "${_task_unmask_per_fwd:-}"
         echo "===== request_rate=${RATE} task=${TASK} =====" >> /tmp/dlm_results/run_dlm_slo_server_log.txt
 
         PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.6 \

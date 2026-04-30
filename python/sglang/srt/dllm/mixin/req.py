@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import enum
+import math
 from typing import TYPE_CHECKING, Optional
 
 from sglang.srt.dllm.config import DllmConfig
@@ -25,6 +26,7 @@ class ReqDllmMixin:
         self.dllm_last_block_time: Optional[float] = None
         self.dllm_tpob_sum = 0.0
         self.dllm_tpob_count = 0
+        self.dllm_tpob_list: list[float] = []  # per-block intervals (s), index = block_idx - 1
         self.dllm_output_block_count = 0
         self.dllm_latency_logged = False
         self.dllm_scheduled_source_phase: Optional[DllmReqPhase] = None
@@ -45,6 +47,9 @@ class ReqDllmMixin:
         # prefill→first_unmask gap: time from last prefill forward → first unmask batch
         self.dllm_prefill_end_time: Optional[float] = None
         self.dllm_first_unmask_gap: Optional[float] = None
+        # LST scheduling: per-phase deadline and admission timestamp
+        self.dllm_current_deadline: Optional[float] = None
+        self.dllm_admission_time: Optional[float] = None
 
         if self.dllm_config is not None:
             if len(self.origin_input_ids) < self.dllm_config.block_size:
@@ -58,12 +63,78 @@ class ReqDllmMixin:
     def record_dllm_block_emit_time(self: Req, ts: float) -> None:
         if self.dllm_first_block_time is None:
             self.dllm_first_block_time = ts
+            # Switch from TTFB deadline to TPOB deadline
+            if self.dllm_config is not None and self.dllm_config.tpob_slo is not None:
+                self.dllm_current_deadline = ts + self.dllm_config.tpob_slo
+            else:
+                self.dllm_current_deadline = None
         elif self.dllm_last_block_time is not None:
-            self.dllm_tpob_sum += ts - self.dllm_last_block_time
+            interval = ts - self.dllm_last_block_time
+            self.dllm_tpob_sum += interval
             self.dllm_tpob_count += 1
+            self.dllm_tpob_list.append(interval)
+            # Refresh TPOB deadline for the next block
+            if self.dllm_config is not None and self.dllm_config.tpob_slo is not None:
+                self.dllm_current_deadline = ts + self.dllm_config.tpob_slo
 
         self.dllm_last_block_time = ts
         self.dllm_output_block_count += 1
+
+    def set_dllm_admission_time(self: Req, ts: float) -> None:
+        """Record admission time and set initial TTFB deadline (called once on first admission).
+
+        Uses the request's actual arrival time (wait_queue_entry_time or
+        scheduler_recv_time) so that time spent in the outer Scheduler.waiting_queue
+        is already counted against the TTFB SLO.  Falls back to `ts` (perf_counter
+        at DLLM admission) only when no arrival timestamp is available.
+        """
+        if self.dllm_admission_time is not None:
+            return  # Already admitted; don't reset deadline mid-flight
+
+        # Prefer the earliest recorded arrival timestamp; all use perf_counter.
+        arrival = getattr(self.time_stats, "wait_queue_entry_time", 0.0)
+        if not arrival:
+            arrival = getattr(self.time_stats, "scheduler_recv_time", 0.0)
+        if not arrival:
+            arrival = ts  # Fallback: DLLM admission time
+
+        self.dllm_admission_time = arrival
+        if self.dllm_config is not None and self.dllm_config.ttfb_slo is not None:
+            self.dllm_current_deadline = arrival + self.dllm_config.ttfb_slo
+
+    def compute_dllm_slack(self: Req, now: float) -> float:
+        """Remaining slack = deadline - now - estimated remaining compute.
+
+        Least-slack-first scheduling: smaller value → higher priority.
+        Returns inf when no deadline is active (LST disabled or TTFB already met
+        and no tpob_slo configured).
+
+        Remaining compute:
+          TTFB phase: remaining_prefill_blocks * prefill_forward_time_s
+                    + ceil(block_size / expected_unmask_per_forward) * decode_forward_time_s
+          TPOB phase: ceil(block_size / expected_unmask_per_forward) * decode_forward_time_s
+        """
+        if self.dllm_current_deadline is None:
+            return float("inf")
+
+        cfg = self.dllm_config
+        block_size = cfg.block_size
+        decode_forwards = math.ceil(block_size / cfg.expected_unmask_per_forward)
+
+        if self.dllm_first_block_time is None:
+            # TTFB phase
+            total_prefill = math.ceil(len(self.origin_input_ids) / block_size)
+            completed = self.dllm_block_offset // block_size if self.dllm_block_offset > 0 else 0
+            remaining_prefill = max(0, total_prefill - completed) if self.is_dllm_prefill() else 0
+            remaining_compute = (
+                remaining_prefill * cfg.prefill_forward_time_s
+                + decode_forwards * cfg.decode_forward_time_s
+            )
+        else:
+            # TPOB phase
+            remaining_compute = decode_forwards * cfg.decode_forward_time_s
+
+        return self.dllm_current_deadline - now - remaining_compute
 
     def get_dllm_ttfb(self: Req) -> Optional[float]:
         if self.dllm_first_block_time is None:

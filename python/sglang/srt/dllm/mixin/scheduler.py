@@ -64,6 +64,7 @@ class SchedulerDllmMixin:
         # Initialize DLLM manager and transfer requests
         self.dllm_manager.init_next_round()
         self._fetch_waiting_reqs()
+        self._sort_dllm_by_laxity()
 
         # Process batches
         forward_mode = self._process_dllm_batches(adder)
@@ -199,6 +200,9 @@ class SchedulerDllmMixin:
             "tpob_s": tpob,
             "tpob_ms": None if tpob is None else tpob * 1000,
             "tpob_count": req.dllm_tpob_count,
+            # Per-block intervals: index i = gap between block i and block i+1 (ms).
+            # Length == num_output_blocks - 1.
+            "tpob_list_ms": [v * 1000 for v in req.dllm_tpob_list],
             # mean inter-block scheduling delay (block ready → enters next batch)
             "decode_delay_s": decode_delay,
             "decode_delay_ms": None if decode_delay is None else decode_delay * 1000,
@@ -528,8 +532,26 @@ class SchedulerDllmMixin:
 
         if num_requests_to_add > 0:
             requests_to_add = self.waiting_queue[:num_requests_to_add]
+            if self.dllm_config.use_lst():
+                now = time.perf_counter()
+                for req in requests_to_add:
+                    req.set_dllm_admission_time(now)
             self.dllm_manager.add_waiting_reqs(requests_to_add)
             self.waiting_queue = self.waiting_queue[num_requests_to_add:]
+
+    def _sort_dllm_by_laxity(self: Scheduler) -> None:
+        """Sort waiting_queue by LST slack (ascending = most urgent first).
+
+        Called after init_next_round + _fetch_waiting_reqs so all requests
+        (returning and newly admitted) are present.  Only active when ttfb_slo
+        or tpob_slo is set in config; no-op otherwise.
+        """
+        if not self.dllm_config.use_lst():
+            return
+        now = time.perf_counter()
+        self.dllm_manager.waiting_queue.sort(
+            key=lambda req: req.compute_dllm_slack(now)
+        )
 
     def _should_skip_prefill(self: Scheduler) -> bool:
         """Check if DLLM prefill should be skipped."""
@@ -566,35 +588,109 @@ class SchedulerDllmMixin:
         )
 
     def _process_dllm_batches(self: Scheduler, adder: PrefillAdder) -> ForwardMode:
-        """Process DLLM batches, filling decode into remaining prefill budget."""
+        """Process DLLM batches.
+
+        Without LST: prefill-priority (original behavior, zero overhead).
+        With LST: unified slack-order traversal — all requests compete by slack
+        regardless of prefill/decode phase, so the most urgent job is always
+        selected first.
+        """
         forward_mode = ForwardMode.DLLM_EXTEND
 
-        prefill_reqs = self.dllm_manager.get_prefill_requests()
-        prefill_result = AddReqResult.CONTINUE
-        if prefill_reqs:
-            prefill_result = self._process_batch_by_phase(
-                adder,
-                prefill_reqs,
-                DllmReqPhase.STAGING_PREFILL,
-                DllmReqPhase.QUEUING_PREFILL,
-            )
-
-        if prefill_result == AddReqResult.CONTINUE:
-            scheduled_reqs = {req.rid for req in adder.can_run_list}
-            decode_reqs = [
-                req
-                for req in self.dllm_manager.get_decode_requests()
-                if req.rid not in scheduled_reqs
-            ]
-            if decode_reqs:
-                self._process_batch_by_phase(
+        if not self.dllm_config.use_lst():
+            # Original prefill-priority path (unchanged)
+            prefill_reqs = self.dllm_manager.get_prefill_requests()
+            prefill_result = AddReqResult.CONTINUE
+            if prefill_reqs:
+                prefill_result = self._process_batch_by_phase(
                     adder,
-                    decode_reqs,
-                    DllmReqPhase.STAGING_DECODE,
-                    DllmReqPhase.QUEUING_DECODE,
+                    prefill_reqs,
+                    DllmReqPhase.STAGING_PREFILL,
+                    DllmReqPhase.QUEUING_PREFILL,
                 )
 
+            if prefill_result == AddReqResult.CONTINUE:
+                scheduled_reqs = {req.rid for req in adder.can_run_list}
+                decode_reqs = [
+                    req
+                    for req in self.dllm_manager.get_decode_requests()
+                    if req.rid not in scheduled_reqs
+                ]
+                if decode_reqs:
+                    self._process_batch_by_phase(
+                        adder,
+                        decode_reqs,
+                        DllmReqPhase.STAGING_DECODE,
+                        DllmReqPhase.QUEUING_DECODE,
+                    )
+        else:
+            self._process_dllm_batches_lst(adder)
+
         return forward_mode
+
+    def _process_dllm_batches_lst(self: Scheduler, adder: PrefillAdder) -> None:
+        """True LST batch selection: iterate waiting_queue in ascending slack order.
+
+        Staging requests (continuation of an active block) are added whenever KV
+        memory allows, independent of request-count capacity, because they must
+        finish the block they started.  Queuing requests (newly scheduled blocks)
+        are gated by request-count capacity; when capacity is exhausted for new
+        requests, queuing requests are skipped but the traversal continues so that
+        urgent staging requests further down the sorted list are not blocked.
+        """
+        scheduled_rids: Set[str] = {req.rid for req in adder.can_run_list}
+        # Once the batch is full for new requests, flip this flag to skip
+        # subsequent queuing reqs without re-evaluating capacity each time.
+        queuing_capacity_exhausted = False
+
+        for req in self.dllm_manager.waiting_queue:
+            if req.rid in scheduled_rids:
+                continue
+
+            is_staging = req.dllm_phase in (
+                DllmReqPhase.STAGING_PREFILL,
+                DllmReqPhase.STAGING_DECODE,
+            )
+
+            if is_staging:
+                req.dllm_scheduled_source_phase = req.dllm_phase
+                self._restore_dllm_active_prefix_indices(req)
+                res = adder.add_dllm_staging_req(req)
+                req.dllm_scheduled_exec_phase = req.dllm_phase
+                if res == AddReqResult.NO_TOKEN:
+                    break  # KV memory exhausted; no further requests can be added
+                scheduled_rids.add(req.rid)
+            else:
+                # QUEUING_PREFILL or QUEUING_DECODE
+                if queuing_capacity_exhausted:
+                    continue  # Batch full for new reqs; still scan for staging reqs
+
+                running_bs = len(self.running_batch.reqs)
+                if len(adder.can_run_list) >= self.get_num_allocatable_reqs(running_bs):
+                    self.running_batch.batch_is_full = True
+                    if (
+                        not self.enable_priority_preemption
+                        or not adder.preempt_to_schedule(req, self.server_args)
+                    ):
+                        queuing_capacity_exhausted = True
+                        continue  # Skip this queuing req; keep scanning for staging
+                    # Preemption succeeded; batch is no longer full
+
+                req.dllm_scheduled_source_phase = req.dllm_phase
+                req.init_next_round_input(self.tree_cache)
+                req.dllm_scheduled_exec_phase = req.dllm_phase
+                res = adder.add_one_req(
+                    req,
+                    has_chunked_req=True,
+                    truncation_align_size=self.truncation_align_size,
+                )
+                if res != AddReqResult.CONTINUE:
+                    if res == AddReqResult.NO_TOKEN:
+                        self.running_batch.batch_is_full = True
+                        break  # KV memory exhausted
+                    queuing_capacity_exhausted = True
+                else:
+                    scheduled_rids.add(req.rid)
 
     def _process_batch_by_phase(
         self,

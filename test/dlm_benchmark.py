@@ -16,6 +16,8 @@ Usage (서버 실행):
     --disable-cuda-graph-padding
 
 Usage (서버 이용한 test):
+    SLO_MULTIPLIER=5.0 \
+    FORWARD_TIME_S=0.03 \
     python test/dlm_benchmark.py \
             --base-url http://localhost:30001 \
             --model inclusionAI/LLaDA2.0-mini \
@@ -23,8 +25,9 @@ Usage (서버 이용한 test):
             --num-examples 200 \
             --num-threads 200 \
             --warmup 16 \
-            --num-output-blocks 8\
-            --block-size 32
+            --num-output-blocks 0\
+            --block-size 32\
+            --request-rate 8\
             --log
 
 Usage (서버 자동 실행):
@@ -1283,6 +1286,244 @@ def plot_scheduling_delays(
     plt.close(fig)
 
 
+def plot_ttfb_per_request(
+    latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]],
+    model_name: str,
+    output_dir: str,
+):
+    """Scatter + running-mean of TTFB ordered by request completion."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    tasks = [
+        task
+        for task, data in latency_data.items()
+        if any("ttfb_ms" in r for r in data.get("request", []))
+    ]
+    if not tasks:
+        print("[plot] no ttfb_ms data in request latency log — skipping")
+        return
+
+    colors = {"gsm8k": "#4C72B0", "humaneval": "#DD8452", "math": "#55A868"}
+    model_tag = model_name.replace("/", "_")
+
+    fig, axes = plt.subplots(1, len(tasks), figsize=(7 * len(tasks), 4), sharey=False)
+    if len(tasks) == 1:
+        axes = [axes]
+
+    for ax, task in zip(axes, tasks):
+        records = latency_data[task].get("request", [])
+        ttfb_vals = [r["ttfb_ms"] for r in records if "ttfb_ms" in r]
+        if not ttfb_vals:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                    transform=ax.transAxes)
+            continue
+
+        color = colors.get(task, "#777")
+        x = np.arange(len(ttfb_vals))
+        arr = np.array(ttfb_vals)
+
+        ax.scatter(x, arr, color=color, s=8, alpha=0.5, label="TTFB")
+
+        # running mean with window=max(1, n//20)
+        window = max(1, len(arr) // 20)
+        kernel = np.ones(window) / window
+        running_mean = np.convolve(arr, kernel, mode="valid")
+        offset = window // 2
+        ax.plot(x[offset: offset + len(running_mean)], running_mean,
+                color="black", linewidth=1.5, label=f"running mean (w={window})")
+
+        mean_v = float(np.mean(arr))
+        p95_v  = float(np.percentile(arr, 95))
+        ax.axhline(mean_v, color="red",    linestyle="--", linewidth=1.0,
+                   label=f"mean={mean_v:.1f} ms")
+        ax.axhline(p95_v,  color="orange", linestyle=":",  linewidth=1.0,
+                   label=f"p95={p95_v:.1f} ms")
+
+        ax.set_title(f"{task.upper()} — TTFB per request", fontsize=12, fontweight="bold")
+        ax.set_xlabel("Request index (completion order)", fontsize=10)
+        ax.set_ylabel("TTFB (ms)", fontsize=10)
+        ax.yaxis.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(fontsize=8)
+        ax.text(
+            0.97, 0.97,
+            f"n={len(arr)}\nmean={mean_v:.1f}\n"
+            f"p50={np.percentile(arr, 50):.1f}\n"
+            f"p95={p95_v:.1f}\n"
+            f"p99={np.percentile(arr, 99):.1f}",
+            transform=ax.transAxes, fontsize=8, va="top", ha="right",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
+        )
+
+    fig.suptitle(f"TTFB per request (completion order) — {model_name}", fontsize=13)
+    fig.tight_layout()
+    out_path = Path(output_dir) / f"ttfb_per_request_{model_tag}.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"[plot] saved → {out_path}")
+    plt.close(fig)
+
+
+def plot_tpob_per_request(
+    latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]],
+    model_name: str,
+    output_dir: str,
+):
+    """Scatter + running-mean of mean TPOB per request, ordered by completion."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    tasks = [
+        task
+        for task, data in latency_data.items()
+        if any("tpob_ms" in r for r in data.get("request", []))
+    ]
+    if not tasks:
+        print("[plot] no tpob_ms data in request latency log — skipping")
+        return
+
+    colors = {"gsm8k": "#4C72B0", "humaneval": "#DD8452", "math": "#55A868"}
+    model_tag = model_name.replace("/", "_")
+
+    fig, axes = plt.subplots(1, len(tasks), figsize=(7 * len(tasks), 4), sharey=False)
+    if len(tasks) == 1:
+        axes = [axes]
+
+    for ax, task in zip(axes, tasks):
+        records = latency_data[task].get("request", [])
+        tpob_vals = [r["tpob_ms"] for r in records if "tpob_ms" in r]
+        if not tpob_vals:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                    transform=ax.transAxes)
+            continue
+
+        color = colors.get(task, "#777")
+        x = np.arange(len(tpob_vals))
+        arr = np.array(tpob_vals)
+
+        ax.scatter(x, arr, color=color, s=8, alpha=0.5, label="mean TPOB")
+
+        window = max(1, len(arr) // 20)
+        kernel = np.ones(window) / window
+        running_mean = np.convolve(arr, kernel, mode="valid")
+        offset = window // 2
+        ax.plot(x[offset: offset + len(running_mean)], running_mean,
+                color="black", linewidth=1.5, label=f"running mean (w={window})")
+
+        mean_v = float(np.mean(arr))
+        p95_v  = float(np.percentile(arr, 95))
+        ax.axhline(mean_v, color="red",    linestyle="--", linewidth=1.0,
+                   label=f"mean={mean_v:.1f} ms")
+        ax.axhline(p95_v,  color="orange", linestyle=":",  linewidth=1.0,
+                   label=f"p95={p95_v:.1f} ms")
+
+        ax.set_title(f"{task.upper()} — mean TPOB per request",
+                     fontsize=12, fontweight="bold")
+        ax.set_xlabel("Request index (completion order)", fontsize=10)
+        ax.set_ylabel("Mean TPOB (ms)", fontsize=10)
+        ax.yaxis.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(fontsize=8)
+        ax.text(
+            0.97, 0.97,
+            f"n={len(arr)}\nmean={mean_v:.1f}\n"
+            f"p50={np.percentile(arr, 50):.1f}\n"
+            f"p95={p95_v:.1f}\n"
+            f"p99={np.percentile(arr, 99):.1f}",
+            transform=ax.transAxes, fontsize=8, va="top", ha="right",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
+        )
+
+    fig.suptitle(f"Mean TPOB per request (completion order) — {model_name}", fontsize=13)
+    fig.tight_layout()
+    out_path = Path(output_dir) / f"tpob_per_request_{model_tag}.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"[plot] saved → {out_path}")
+    plt.close(fig)
+
+
+def plot_tpob_by_block_index(
+    latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]],
+    model_name: str,
+    output_dir: str,
+):
+    """Box plot of TPOB (inter-block time) grouped by block transition index.
+
+    tpob_list_ms[i] is the gap from block i to block i+1.
+    Sample count decreases at higher indices since fewer requests produce many blocks.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    tasks = [
+        task
+        for task, data in latency_data.items()
+        if any("tpob_list_ms" in r for r in data.get("request", []))
+    ]
+    if not tasks:
+        print("[plot] no tpob_list_ms data in request latency log — skipping")
+        return
+
+    colors = {"gsm8k": "#4C72B0", "humaneval": "#DD8452", "math": "#55A868"}
+    model_tag = model_name.replace("/", "_")
+
+    fig, axes = plt.subplots(1, len(tasks), figsize=(6 * len(tasks), 5), sharey=False)
+    if len(tasks) == 1:
+        axes = [axes]
+
+    for ax, task in zip(axes, tasks):
+        request_records = latency_data[task].get("request", [])
+        by_index: Dict[int, List[float]] = {}
+        for rec in request_records:
+            tpob_list = rec.get("tpob_list_ms")
+            if not tpob_list:
+                continue
+            for idx, val in enumerate(tpob_list):
+                by_index.setdefault(idx, []).append(float(val))
+
+        if not by_index:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                    transform=ax.transAxes)
+            ax.set_title(f"{task.upper()}", fontsize=12, fontweight="bold")
+            continue
+
+        sorted_indices = sorted(by_index.keys())
+        data_groups = [by_index[i] for i in sorted_indices]
+        tick_labels = [f"blk {i}→{i+1}\n(n={len(by_index[i])})" for i in sorted_indices]
+        color = colors.get(task, "#777")
+
+        bp = ax.boxplot(
+            data_groups,
+            tick_labels=tick_labels,
+            patch_artist=True,
+            notch=False,
+            showfliers=False,
+        )
+        for patch in bp["boxes"]:
+            patch.set_facecolor(color)
+            patch.set_alpha(0.65)
+
+        means = [float(np.mean(g)) for g in data_groups]
+        ax.plot(range(1, len(sorted_indices) + 1), means, "r--o",
+                linewidth=1.2, markersize=4, label="mean")
+
+        overall_mean = float(np.mean([v for g in data_groups for v in g]))
+        ax.axhline(overall_mean, color="gray", linestyle=":", linewidth=1.0,
+                   label=f"overall mean={overall_mean:.1f}")
+
+        ax.set_title(f"{task.upper()} — TPOB by block transition",
+                     fontsize=12, fontweight="bold")
+        ax.set_xlabel("Block transition", fontsize=10)
+        ax.set_ylabel("TPOB (ms)", fontsize=10)
+        ax.yaxis.grid(True, linestyle="--", alpha=0.5)
+        ax.legend(fontsize=8)
+
+    fig.suptitle(f"TPOB distribution by block index — {model_name}", fontsize=13)
+    fig.tight_layout()
+    out_path = Path(output_dir) / f"tpob_by_block_index_{model_tag}.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"[plot] saved → {out_path}")
+    plt.close(fig)
+
+
 def plot_latency_metrics(
     latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]],
     model_name: str,
@@ -1775,8 +2016,11 @@ def main():
             plot_forward_latency(step_data, model_name=model, output_dir=args.output_dir)
             plot_context_length_distribution(latency_data, model_name=model, output_dir=args.output_dir)
             plot_scheduling_delays(latency_data, model_name=model, output_dir=args.output_dir)
+            plot_ttfb_per_request(latency_data, model_name=model, output_dir=args.output_dir)
+            plot_tpob_per_request(latency_data, model_name=model, output_dir=args.output_dir)
+            plot_tpob_by_block_index(latency_data, model_name=model, output_dir=args.output_dir)
             # takes too long time to make figure
-            # plot_latency_metrics(latency_data, model_name=model, output_dir=args.output_dir)
+            #plot_latency_metrics(latency_data, model_name=model, output_dir=args.output_dir)
 
     finally:
         if server_proc is not None:

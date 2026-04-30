@@ -4,7 +4,7 @@ Compute per-task DLM SLO satisfaction rates from dlm_benchmark.py latency logs.
 
 Examples:
     # From a dlm_benchmark.py summary JSON.
-    python test/dlm_slorate.py --summary outputs/summary_inclusionAI_LLaDA2.0-mini.json
+    python test/dlm_slorate.py --summary /tmp/dlm_results/summary_inclusionAI_LLaDA2.0-mini.json
 
     # From per-task JSONL files in an output directory.
     python test/dlm_slorate.py --latency-dir outputs --tasks gsm8k humaneval math
@@ -46,9 +46,9 @@ class TaskSlo:
 
 
 DEFAULT_BASE_MS: Dict[str, Dict[str, float]] = {
-    "gsm8k": {"ttfb_ms": 417.2, "tpob_ms": 354.5},
-    "humaneval": {"ttfb_ms": 312.9, "tpob_ms": 172.7},
-    "math": {"ttfb_ms": 404.5, "tpob_ms": 442.3},
+    "gsm8k": {"ttfb_ms": 417.2, "tpob_ms": 348.5},
+    "humaneval": {"ttfb_ms": 312.9, "tpob_ms": 158.8},
+    "math": {"ttfb_ms": 404.5, "tpob_ms": 436.5},
 }
 
 
