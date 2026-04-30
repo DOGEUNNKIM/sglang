@@ -6,14 +6,15 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_results}"
 BLOCK_SIZE="${BLOCK_SIZE:-32}"
 WARMUP="${WARMUP:-16}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
-REQUEST_RATES=(${REQUEST_RATES:-8})
-TASKS=(${TASKS:-gsm8k}) ##### TASK  humaneval math
+REQUEST_RATES=(${REQUEST_RATES:-2 4 8})
+TASKS=(${TASKS:-math gsm8k humaneval}) ##### TASK
 NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
 PORT="${PORT:-30000}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 THRESHOLD="${THRESHOLD:-0.95}"
-DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-0}" ###### DLLM_WAITING_QUEUE
+NUM_THREADS="${NUM_THREADS:-200}"   ######################## DLLM max concurrent request
+DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-200}" ###### DLLM_WAITING_QUEUE
 CONFIG_PATH="${CONFIG_PATH:-/tmp/dlm_algo_config.yaml}"
 STEP_LOG_FILE="${STEP_LOG_FILE:-/tmp/dlm_step_stats.jsonl}"
 REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-/tmp/dlm_request_latency.jsonl}"
@@ -94,6 +95,7 @@ for RATE in "${REQUEST_RATES[@]}"; do
             --block-size "${BLOCK_SIZE}"
             --log
             --request-rate "${RATE}"
+            --num-threads "${NUM_THREADS}"
             --warmup "${WARMUP}"
             --num-output-blocks "${NUM_OUTPUT_BLOCKS}"
             --output-dir "${OUT_DIR}"

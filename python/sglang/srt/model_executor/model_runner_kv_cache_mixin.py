@@ -195,10 +195,9 @@ class ModelRunnerKVCacheMixin:
         """Initialize the memory pools."""
         max_num_reqs = self.max_running_requests
 
-        # DLLM: waiting_queue (≤ admission_window) and staging_queue
-        # (≤ max_running_requests) both hold pool slots simultaneously, so the
-        # pool must cover their combined maximum.  Do NOT touch max_running_requests
-        # itself — that drives CUDA-graph batch sizes.
+        # DLLM: admitted requests and the previous-forward requests pending
+        # next-round initialization can coexist. Keep extra req slots without
+        # changing max_running_requests, which drives CUDA-graph batch sizes.
         if self.server_args.dllm_algorithm_config is not None:
             try:
                 import yaml

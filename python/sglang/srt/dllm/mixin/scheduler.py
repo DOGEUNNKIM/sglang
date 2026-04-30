@@ -444,8 +444,18 @@ class SchedulerDllmMixin:
             else None
         )
         dllm_waiting_queue_size = len(self.dllm_manager.waiting_queue)
-        dllm_staging_queue_size = len(self.dllm_manager.staging_queue)
-        dllm_admitted_reqs = dllm_waiting_queue_size + dllm_staging_queue_size
+        dllm_pending_next_round_reqs_size = len(
+            self.dllm_manager.pending_next_round_reqs
+        )
+        dllm_admitted_reqs = len(
+            {
+                req.rid
+                for req in (
+                    self.dllm_manager.waiting_queue
+                    + self.dllm_manager.pending_next_round_reqs
+                )
+            }
+        )
 
         record = {
             "seq": getattr(batch, "dllm_batch_seq", None),
@@ -474,7 +484,7 @@ class SchedulerDllmMixin:
             "dllm_admission_window": self.dllm_config.admission_window,
             "dllm_max_running_requests": self.dllm_config.max_running_requests,
             "dllm_waiting_queue_size": dllm_waiting_queue_size,
-            "dllm_staging_queue_size": dllm_staging_queue_size,
+            "dllm_pending_next_round_reqs_size": dllm_pending_next_round_reqs_size,
             "dllm_admitted_reqs": dllm_admitted_reqs,
             "duration_s": duration_s,
             "duration_ms": duration_s * 1000,
@@ -617,7 +627,7 @@ class SchedulerDllmMixin:
                 self._add_request_to_queue(req)
 
         if can_run_list:
-            self.dllm_manager.add_staging_reqs(can_run_list)
+            self.dllm_manager.set_pending_next_round_reqs(can_run_list)
             self.dllm_manager.increment_chunked_count()
 
         self.adder = adder
@@ -745,9 +755,10 @@ class DllmManager:
     """
     Manager for Diffusion LLM request scheduling.
 
-    Maintains two queues:
+    Maintains request sets:
     - waiting_queue: The requests waiting to be scheduled with max running requests limit
-    - staging_queue: Requests allocated resources by PrefillAdder
+    - pending_next_round_reqs: Requests from the previous forward that need
+      init_next_round_input() before they can be scheduled again
     """
 
     def __init__(self, dllm_config: Optional[DllmConfig] = None):
@@ -756,7 +767,7 @@ class DllmManager:
             dllm_config.max_running_requests if dllm_config is not None else 1
         )
         self.waiting_queue: List[Req] = []
-        self.staging_queue: List[Req] = []
+        self.pending_next_round_reqs: List[Req] = []
 
     def get_prefill_requests(self) -> List[Req]:
         """Get all prefill requests from waiting queue."""
@@ -778,42 +789,49 @@ class DllmManager:
 
         self.waiting_queue.extend(reqs_to_add)
 
-    def add_staging_reqs(self, reqs: Union[Req, List[Req]]) -> None:
-        """Add requests to staging queue (allocated by PrefillAdder)."""
+    def set_pending_next_round_reqs(self, reqs: Union[Req, List[Req]]) -> None:
+        """Remember requests that need next-round initialization."""
         reqs_to_add = reqs if isinstance(reqs, list) else [reqs]
-        self.staging_queue.extend(reqs_to_add)
+        self.pending_next_round_reqs = list(reqs_to_add)
 
     def _has_duplicate_reqs(self, reqs: List[Req]) -> bool:
         """Check if any request ID already exists in waiting queue."""
         existing_rids: Set[str] = {r.rid for r in self.waiting_queue}
         return any(req.rid in existing_rids for req in reqs)
 
-    def any_staging_reqs(self) -> bool:
-        """Check if there are requests in staging queue."""
-        return self.dllm_config is not None and len(self.staging_queue) > 0
+    def any_pending_next_round_reqs(self) -> bool:
+        """Check if any previous-forward requests need next-round initialization."""
+        return (
+            self.dllm_config is not None and len(self.pending_next_round_reqs) > 0
+        )
 
     def is_empty(self) -> bool:
         """Check if both queues are empty or DLLM is not configured."""
         if self.dllm_config is None:
             return True
-        return len(self.waiting_queue) == 0 and len(self.staging_queue) == 0
+        return (
+            len(self.waiting_queue) == 0
+            and len(self.pending_next_round_reqs) == 0
+        )
 
     def increment_chunked_count(self) -> None:
-        """Increment chunked count for all staging requests."""
-        for req in self.staging_queue:
+        """Increment chunked count for requests selected for the last forward."""
+        for req in self.pending_next_round_reqs:
             req.is_chunked += 1
 
     def filter_finished_reqs(self) -> None:
         """Remove finished requests from both queues."""
         self.waiting_queue = [req for req in self.waiting_queue if not req.finished()]
-        self.staging_queue = [req for req in self.staging_queue if not req.finished()]
+        self.pending_next_round_reqs = [
+            req for req in self.pending_next_round_reqs if not req.finished()
+        ]
 
     def init_next_round(self) -> None:
-        """Initialize staging requests for next round and clear staging queue."""
-        for req in self.staging_queue:
+        """Initialize previous-forward requests for next round and clear them."""
+        for req in self.pending_next_round_reqs:
             req.init_next_round_input()
             if not req.finished() and all(
                 waiting_req.rid != req.rid for waiting_req in self.waiting_queue
             ):
                 self.waiting_queue.append(req)
-        self.staging_queue = []
+        self.pending_next_round_reqs = []

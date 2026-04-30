@@ -3,17 +3,36 @@
 DLM inference benchmark: GSM8K, HumanEval, MATH
 각 task별로 block당 실제 unmask step 수를 수집해 matplotlib으로 시각화.
 
-Usage (기존 서버에 연결):
+Usage (서버 실행):
+    python -m sglang.launch_server \
+    --model-path inclusionAI/LLaDA2.0-mini \
+    --port 30001 \
+    --trust-remote-code \
+    --dllm-algorithm LowConfidence \
+    --dllm-algorithm-config /tmp/dlm_algo_config.yaml \
+    --attention-backend flashinfer \
+    --max-running-requests 16 \
+    --cuda-graph-max-bs 16 \
+    --disable-cuda-graph-padding
+
+Usage (서버 이용한 test):
     python test/dlm_benchmark.py \
-        --base-url http://localhost:30000 \
-        --model inclusionAI/LLaDA2.0-mini \
-        --tasks gsm8k humaneval math
+            --base-url http://localhost:30001 \
+            --model inclusionAI/LLaDA2.0-mini \
+            --tasks gsm8k humaneval math \
+            --num-examples 200 \
+            --num-threads 200 \
+            --warmup 16 \
+            --num-output-blocks 8\
+            --block-size 32
+            --log
 
 Usage (서버 자동 실행):
     python test/dlm_benchmark.py \
         --model-path inclusionAI/LLaDA2.0-mini \
         --tasks gsm8k humaneval math \
-        --tp-size 2 --num-examples 200
+        --tp-size 2 --num-examples 200 \
+        --num-threads 200
 
 step_log_file 설정 예시 (config.yaml):
     threshold: 0.95
@@ -651,6 +670,44 @@ def _percentile(values: List[float], q: float) -> Optional[float]:
     return float(np.percentile(values, q))
 
 
+def _ideal_ttfb_values(records: List[Dict[str, Any]]) -> List[float]:
+    values = []
+    for record in records:
+        ttfb = record.get("ttfb_ms")
+        sched_wait = record.get("sched_wait_ms")
+        first_unmask_gap = record.get("first_unmask_gap_ms")
+        if ttfb is None or sched_wait is None or first_unmask_gap is None:
+            continue
+        values.append(float(ttfb) - float(sched_wait) - float(first_unmask_gap))
+    return values
+
+
+def _ideal_tpob_values(records: List[Dict[str, Any]]) -> List[float]:
+    values = []
+    for record in records:
+        tpob = record.get("tpob_ms")
+        decode_delay = record.get("decode_delay_ms")
+        if tpob is None or decode_delay is None:
+            continue
+        values.append(float(tpob) - float(decode_delay))
+    return values
+
+
+def _prefill_block_counts_by_request(
+    records: List[Dict[str, Any]],
+) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for record in records:
+        rids = record.get("rids") or []
+        modes = record.get("per_req_mode") or []
+        for rid, mode in zip(rids, modes):
+            if rid not in counts:
+                counts[rid] = 0
+            if mode == "prefill":
+                counts[rid] += 1
+    return counts
+
+
 def _weighted_batch_mean(
     records: List[Dict[str, Any]],
     phase: str,
@@ -723,6 +780,96 @@ def _batch_visual_phase(record: Dict[str, Any]) -> str:
     return record.get("phase", "unknown")
 
 
+def _fmt_metric(value: Any) -> str:
+    if value is None:
+        return "N/A"
+    if isinstance(value, float):
+        return f"{value:.2f}"
+    return str(value)
+
+
+def print_latency_summary(task: str, summary: Dict[str, Any]) -> None:
+    rows = [
+        (
+            "Wait/Queue",
+            [
+                ("sched_wait mean", "mean_sched_wait_ms"),
+                ("sched_wait p95", "p95_sched_wait_ms"),
+                ("decode_delay mean", "mean_decode_delay_ms"),
+                ("decode_delay p95", "p95_decode_delay_ms"),
+                ("first_unmask_gap mean", "mean_first_unmask_gap_ms"),
+                ("first_unmask_gap p95", "p95_first_unmask_gap_ms"),
+            ],
+        ),
+        (
+            "Observed",
+            [
+                ("TTFB mean", "mean_ttfb_ms"),
+                ("TTFB p95", "p95_ttfb_ms"),
+                ("TTFB p99", "p99_ttfb_ms"),
+                ("TPOB mean", "mean_tpob_ms"),
+                ("TPOB p95", "p95_tpob_ms"),
+                ("TPOB p99", "p99_tpob_ms"),
+            ],
+        ),
+        (
+            "Ideal",
+            [
+                ("ideal TTFB mean", "mean_ideal_ttfb_ms"),
+                ("ideal TTFB p95", "p95_ideal_ttfb_ms"),
+                ("ideal TPOB mean", "mean_ideal_tpob_ms"),
+                ("ideal TPOB p95", "p95_ideal_tpob_ms"),
+            ],
+        ),
+        (
+            "Blocks/Batches",
+            [
+                ("generated blocks mean", "mean_generated_blocks"),
+                ("prefill blocks mean", "mean_prefill_blocks"),
+                ("prefill req ms", "avg_prefill_req_ms"),
+                ("decode block ms", "avg_decode_block_ms"),
+                ("initial prefill ms", "avg_initial_prefill_req_ms"),
+                ("staging prefill ms", "avg_staging_prefill_req_ms"),
+            ],
+        ),
+        (
+            "Admission",
+            [
+                ("admission window", "dllm_admission_window"),
+                ("admitted mean", "mean_dllm_admitted_reqs"),
+                ("admitted max", "max_dllm_admitted_reqs"),
+                ("waiting q mean", "mean_dllm_waiting_queue_size"),
+                ("waiting q max", "max_dllm_waiting_queue_size"),
+                (
+                    "pending next mean",
+                    "mean_dllm_pending_next_round_reqs_size",
+                ),
+                ("pending next max", "max_dllm_pending_next_round_reqs_size"),
+            ],
+        ),
+        (
+            "Phase",
+            [
+                ("mixed batches", "mixed_mask_batches"),
+                ("mixed prefill/decode", "mixed_prefill_decode_batches"),
+                ("phase switches", "phase_switches"),
+            ],
+        ),
+    ]
+
+    print(f"[{task}] latency stats")
+    for title, metrics in rows:
+        print(f"  {title}:")
+        for label, key in metrics:
+            print(f"    {label:<24} {_fmt_metric(summary.get(key))}")
+
+    phase_counts = summary.get("request_phase_counts")
+    if phase_counts:
+        print("  Request phases:")
+        for phase, count in phase_counts.items():
+            print(f"    {phase:<24} {count}")
+
+
 def summarize_latency_metrics(
     request_records: List[Dict[str, Any]],
     batch_records: List[Dict[str, Any]],
@@ -734,6 +881,11 @@ def summarize_latency_metrics(
     sched_wait_ms = _values(request_records, "sched_wait_ms")
     decode_delay_ms = _values(request_records, "decode_delay_ms")
     first_unmask_gap_ms = _values(request_records, "first_unmask_gap_ms")
+    ideal_ttfb_ms = _ideal_ttfb_values(request_records)
+    ideal_tpob_ms = _ideal_tpob_values(request_records)
+    generated_block_counts = _values(request_records, "num_output_blocks")
+    prefill_block_counts_by_req = _prefill_block_counts_by_request(batch_records)
+    prefill_block_counts = list(prefill_block_counts_by_req.values())
     avg_prefill_req_ms = _weighted_batch_mean(
         batch_records, "prefill", "duration_ms", "num_reqs"
     )
@@ -751,7 +903,13 @@ def summarize_latency_metrics(
     )
     dllm_admitted_reqs = _values(batch_records, "dllm_admitted_reqs")
     dllm_waiting_queue_size = _values(batch_records, "dllm_waiting_queue_size")
-    dllm_staging_queue_size = _values(batch_records, "dllm_staging_queue_size")
+    dllm_pending_next_round_reqs_size = _values(
+        batch_records, "dllm_pending_next_round_reqs_size"
+    )
+    if not dllm_pending_next_round_reqs_size:
+        dllm_pending_next_round_reqs_size = _values(
+            batch_records, "dllm_staging_queue_size"
+        )
     dllm_admission_window = _values(batch_records, "dllm_admission_window")
     phase_sequence = [record.get("phase") for record in batch_records]
     req_phase_counts = _count_per_req_phases(batch_records)
@@ -778,6 +936,28 @@ def summarize_latency_metrics(
         "p50_tpob_ms": _percentile(tpob_ms, 50),
         "p95_tpob_ms": _percentile(tpob_ms, 95),
         "p99_tpob_ms": _percentile(tpob_ms, 99),
+        "n_ideal_ttfb_records": len(ideal_ttfb_ms),
+        "mean_ideal_ttfb_ms": (
+            float(np.mean(ideal_ttfb_ms)) if ideal_ttfb_ms else None
+        ),
+        "p50_ideal_ttfb_ms": _percentile(ideal_ttfb_ms, 50),
+        "p95_ideal_ttfb_ms": _percentile(ideal_ttfb_ms, 95),
+        "p99_ideal_ttfb_ms": _percentile(ideal_ttfb_ms, 99),
+        "n_ideal_tpob_records": len(ideal_tpob_ms),
+        "mean_ideal_tpob_ms": (
+            float(np.mean(ideal_tpob_ms)) if ideal_tpob_ms else None
+        ),
+        "p50_ideal_tpob_ms": _percentile(ideal_tpob_ms, 50),
+        "p95_ideal_tpob_ms": _percentile(ideal_tpob_ms, 95),
+        "p99_ideal_tpob_ms": _percentile(ideal_tpob_ms, 99),
+        "n_generated_block_records": len(generated_block_counts),
+        "mean_generated_blocks": (
+            float(np.mean(generated_block_counts)) if generated_block_counts else None
+        ),
+        "n_prefill_block_records": len(prefill_block_counts),
+        "mean_prefill_blocks": (
+            float(np.mean(prefill_block_counts)) if prefill_block_counts else None
+        ),
         "n_batch_records": len(batch_records),
         "avg_prefill_req_ms": avg_prefill_req_ms,
         "avg_decode_block_ms": avg_decode_block_ms,
@@ -801,13 +981,15 @@ def summarize_latency_metrics(
         "max_dllm_waiting_queue_size": (
             int(max(dllm_waiting_queue_size)) if dllm_waiting_queue_size else None
         ),
-        "mean_dllm_staging_queue_size": (
-            float(np.mean(dllm_staging_queue_size))
-            if dllm_staging_queue_size
+        "mean_dllm_pending_next_round_reqs_size": (
+            float(np.mean(dllm_pending_next_round_reqs_size))
+            if dllm_pending_next_round_reqs_size
             else None
         ),
-        "max_dllm_staging_queue_size": (
-            int(max(dllm_staging_queue_size)) if dllm_staging_queue_size else None
+        "max_dllm_pending_next_round_reqs_size": (
+            int(max(dllm_pending_next_round_reqs_size))
+            if dllm_pending_next_round_reqs_size
+            else None
         ),
         "request_phase_counts": req_phase_counts,
         "mixed_mask_batches": sum(
@@ -1377,7 +1559,7 @@ def main():
                         choices=["gsm8k", "humaneval", "math"],
                         default=["gsm8k", "humaneval", "math"])
     parser.add_argument("--num-examples", type=int, default=None)
-    parser.add_argument("--num-threads", type=int, default=64)
+    parser.add_argument("--num-threads", type=int, default=200)
     parser.add_argument("--request-rate", type=float, default=None,
                         help="전체 request 시작 rate(req/s). 미지정 시 기존 closed-loop 방식")
     parser.add_argument("--gsm8k-data-path", type=str, default=None)
@@ -1428,6 +1610,7 @@ def main():
         all_results: Dict[str, Dict] = {}
         step_data: Dict[str, Dict[str, List[int]]] = {}
         latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        effective_block_size = args.block_size or 32
 
         for task in args.tasks:
             print(f"\n{'='*60}")
@@ -1459,7 +1642,7 @@ def main():
                 math_data_path=args.math_data_path,
                 request_rate=args.request_rate,
                 num_output_blocks=args.num_output_blocks,
-                block_size=args.block_size,
+                block_size=effective_block_size,
             )
             all_results[task] = metrics
 
@@ -1526,42 +1709,9 @@ def main():
                       f"p99={np.percentile(forward_durations_ms, 99):.1f}  "
                       f"max={max(forward_durations_ms):.1f}")
             if args.log:
-                print(
-                    f"[{task}] latency stats: "
-                    f"mean_sched_wait_ms={latency_summary.get('mean_sched_wait_ms')}  "
-                    f"p95_sched_wait_ms={latency_summary.get('p95_sched_wait_ms')}  "
-                    f"mean_decode_delay_ms={latency_summary.get('mean_decode_delay_ms')}  "
-                    f"p95_decode_delay_ms={latency_summary.get('p95_decode_delay_ms')}  "
-                    f"mean_first_unmask_gap_ms={latency_summary.get('mean_first_unmask_gap_ms')}  "
-                    f"p95_first_unmask_gap_ms={latency_summary.get('p95_first_unmask_gap_ms')}  "
-                    f"mean_ttfb_ms={latency_summary.get('mean_ttfb_ms')}  "
-                    f"p95_ttfb_ms={latency_summary.get('p95_ttfb_ms')}  "
-                    f"p99_ttfb_ms={latency_summary.get('p99_ttfb_ms')}  "
-                    f"mean_tpob_ms={latency_summary.get('mean_tpob_ms')}  "
-                    f"p95_tpob_ms={latency_summary.get('p95_tpob_ms')}  "
-                    f"p99_tpob_ms={latency_summary.get('p99_tpob_ms')}  "
-                    f"avg_prefill_req_ms={latency_summary.get('avg_prefill_req_ms')}  "
-                    f"avg_decode_block_ms={latency_summary.get('avg_decode_block_ms')}  "
-                    f"initial_prefill_req_ms={latency_summary.get('avg_initial_prefill_req_ms')}  "
-                    f"staging_prefill_req_ms={latency_summary.get('avg_staging_prefill_req_ms')}  "
-                    f"dllm_admission_window={latency_summary.get('dllm_admission_window')}  "
-                    f"mean_dllm_admitted_reqs={latency_summary.get('mean_dllm_admitted_reqs')}  "
-                    f"max_dllm_admitted_reqs={latency_summary.get('max_dllm_admitted_reqs')}  "
-                    f"mean_dllm_waiting_queue_size={latency_summary.get('mean_dllm_waiting_queue_size')}  "
-                    f"max_dllm_waiting_queue_size={latency_summary.get('max_dllm_waiting_queue_size')}  "
-                    f"mean_dllm_staging_queue_size={latency_summary.get('mean_dllm_staging_queue_size')}  "
-                    f"max_dllm_staging_queue_size={latency_summary.get('max_dllm_staging_queue_size')}  "
-                    f"mixed_batches={latency_summary.get('mixed_mask_batches')}  "
-                    f"mixed_prefill_decode_batches={latency_summary.get('mixed_prefill_decode_batches')}  "
-                    f"phase_switches={latency_summary.get('phase_switches')}"
-                )
+                print_latency_summary(task, latency_summary)
             else:
                 print(f"[{task}] DLM logging disabled; pass --log to collect latency/step stats")
-            if latency_summary.get("request_phase_counts"):
-                print(
-                    f"[{task}] request phase counts: "
-                    f"{latency_summary['request_phase_counts']}"
-                )
 
             # task별 결과 저장
             model_tag = model.replace("/", "_")

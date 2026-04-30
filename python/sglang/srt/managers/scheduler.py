@@ -2306,9 +2306,12 @@ class Scheduler(
         # Merge the prefill batch into the running batch
         chunked_req_to_exclude = set()
 
-        if self.dllm_config is not None and self.dllm_manager.any_staging_reqs():
-            chunked_req_to_exclude.update(self.dllm_manager.staging_queue)
-            for req in self.dllm_manager.staging_queue:
+        if (
+            self.dllm_config is not None
+            and self.dllm_manager.any_pending_next_round_reqs()
+        ):
+            chunked_req_to_exclude.update(self.dllm_manager.pending_next_round_reqs)
+            for req in self.dllm_manager.pending_next_round_reqs:
                 if not getattr(req, "has_dllm_active_block", lambda: False)():
                     self.stash_chunked_request(req)
 
@@ -3062,7 +3065,7 @@ class Scheduler(
         idle = (
             self.running_batch.is_empty()
             and self.chunked_req is None
-            and not self.dllm_manager.any_staging_reqs()
+            and not self.dllm_manager.any_pending_next_round_reqs()
             and (self.last_batch is None or self.last_batch.is_empty())
             and (self.cur_batch is None or self.cur_batch.is_empty())
             and (not self.enable_overlap or len(self.result_queue) == 0)

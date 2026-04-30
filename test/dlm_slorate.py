@@ -46,9 +46,9 @@ class TaskSlo:
 
 
 DEFAULT_BASE_MS: Dict[str, Dict[str, float]] = {
-    "gsm8k": {"ttfb_ms": 547.0, "tpob_ms": 524.0},
-    "humaneval": {"ttfb_ms": 289.0, "tpob_ms": 152.0},
-    "math": {"ttfb_ms": 332.0, "tpob_ms": 412.0},
+    "gsm8k": {"ttfb_ms": 417.2, "tpob_ms": 354.5},
+    "humaneval": {"ttfb_ms": 312.9, "tpob_ms": 172.7},
+    "math": {"ttfb_ms": 404.5, "tpob_ms": 442.3},
 }
 
 
