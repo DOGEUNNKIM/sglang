@@ -9,7 +9,9 @@ from sglang.srt.dllm.config import DllmConfig
 from sglang.srt.dllm.mixin.req import DllmReqPhase
 from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
 from sglang.srt.managers.schedule_policy import AddReqResult, PrefillAdder
+from sglang.srt.mem_cache.base_prefix_cache import MatchPrefixParams
 from sglang.srt.mem_cache.common import release_kv_cache
+from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.observability.req_time_stats import set_time_batch
 
@@ -538,6 +540,27 @@ class SchedulerDllmMixin:
                     req.set_dllm_admission_time(now)
             self.dllm_manager.add_waiting_reqs(requests_to_add)
             self.waiting_queue = self.waiting_queue[num_requests_to_add:]
+
+            # Lightweight prefix peek for new QUEUING_PREFILL requests so that
+            # _sort_dllm_by_laxity() sees actual cache hits in compute_dllm_slack.
+            # Only updates dllm_prefetched_prefix_len — does NOT touch fill_ids,
+            # dllm_block_offset, or extend_input_len, so no scheduling state is
+            # mutated and the normal init_next_round_input path stays intact.
+            if self.dllm_config.use_lst() and not self.tree_cache.disable:
+                for req in requests_to_add:
+                    if req.dllm_phase == DllmReqPhase.QUEUING_PREFILL:
+                        temp_ids = req.origin_input_ids
+                        max_prefix_len = max(len(temp_ids) - 1, 0)
+                        if max_prefix_len > 0:
+                            match_result = self.tree_cache.match_prefix(
+                                MatchPrefixParams(
+                                    key=RadixKey(
+                                        token_ids=temp_ids[:max_prefix_len],
+                                        extra_key=req.extra_key,
+                                    ),
+                                )
+                            )
+                            req.dllm_prefetched_prefix_len = len(match_result.device_indices)
 
     def _sort_dllm_by_laxity(self: Scheduler) -> None:
         """Sort waiting_queue by LST slack (ascending = most urgent first).

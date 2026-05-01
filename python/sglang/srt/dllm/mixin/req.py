@@ -50,6 +50,11 @@ class ReqDllmMixin:
         # LST scheduling: per-phase deadline and admission timestamp
         self.dllm_current_deadline: Optional[float] = None
         self.dllm_admission_time: Optional[float] = None
+        # Prefix length from a lightweight cache peek done in _fetch_waiting_reqs
+        # before the request is fully scheduled.  Used only in compute_dllm_slack
+        # so that cache hits are reflected in remaining_prefill even before
+        # init_next_round_input sets prefix_indices.
+        self.dllm_prefetched_prefix_len: int = 0
 
         if self.dllm_config is not None:
             if len(self.origin_input_ids) < self.dllm_config.block_size:
@@ -113,6 +118,10 @@ class ReqDllmMixin:
           TTFB phase: remaining_prefill_blocks * prefill_forward_time_s
                     + ceil(block_size / expected_unmask_per_forward) * decode_forward_time_s
           TPOB phase: ceil(block_size / expected_unmask_per_forward) * decode_forward_time_s
+
+        completed uses len(prefix_indices) so that pre-fetched prefix cache hits
+        (done by _fetch_waiting_reqs for new QUEUING_PREFILL requests) are
+        reflected in remaining_prefill.
         """
         if self.dllm_current_deadline is None:
             return float("inf")
@@ -124,7 +133,9 @@ class ReqDllmMixin:
         if self.dllm_first_block_time is None:
             # TTFB phase
             total_prefill = math.ceil(len(self.origin_input_ids) / block_size)
-            completed = self.dllm_block_offset // block_size if self.dllm_block_offset > 0 else 0
+            # Use the larger of the live prefix_indices and the pre-fetched peek
+            # so cache hits are reflected even before init_next_round_input runs.
+            completed = max(len(self.prefix_indices), self.dllm_prefetched_prefix_len) // block_size
             remaining_prefill = max(0, total_prefill - completed) if self.is_dllm_prefill() else 0
             remaining_compute = (
                 remaining_prefill * cfg.prefill_forward_time_s
