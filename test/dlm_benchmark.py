@@ -1748,6 +1748,91 @@ def plot_tpob_by_block_index(
     plt.close(fig)
 
 
+def plot_block_steps_per_request(
+    latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]],
+    model_name: str,
+    output_dir: str,
+):
+    """Line plot of decode forward steps per block index, one line per request.
+
+    Each line connects block_steps_list[0], [1], ... for a single request.
+    Line alpha varies from light (first request) to dark (last request) so
+    ordering effects are visible without overplotting.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    tasks = [
+        task
+        for task, data in latency_data.items()
+        if any(
+            r.get("block_steps_list") for r in data.get("request", [])
+        )
+    ]
+    if not tasks:
+        print("[plot] no block_steps_list data in request latency log — skipping")
+        return
+
+    colors = {"gsm8k": "#4C72B0", "humaneval": "#DD8452", "math": "#55A868"}
+    model_tag = model_name.replace("/", "_")
+
+    fig, axes = plt.subplots(1, len(tasks), figsize=(6 * len(tasks), 5), sharey=False)
+    if len(tasks) == 1:
+        axes = [axes]
+
+    for ax, task in zip(axes, tasks):
+        records = [
+            r for r in latency_data[task].get("request", [])
+            if r.get("block_steps_list")
+        ]
+        if not records:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                    transform=ax.transAxes)
+            ax.set_title(f"{task.upper()}", fontsize=12, fontweight="bold")
+            continue
+
+        color = colors.get(task, "#777")
+        n = len(records)
+
+        for i, rec in enumerate(records):
+            steps = rec["block_steps_list"]
+            alpha = 0.15 + 0.70 * (i / max(n - 1, 1))
+            ax.plot(
+                range(len(steps)),
+                steps,
+                color=color,
+                alpha=alpha,
+                linewidth=0.8,
+            )
+
+        # overlay per-block mean
+        max_blocks = max(len(r["block_steps_list"]) for r in records)
+        means = []
+        for b in range(max_blocks):
+            vals = [r["block_steps_list"][b] for r in records if b < len(r["block_steps_list"])]
+            means.append(float(np.mean(vals)))
+        ax.plot(range(max_blocks), means, "r--o",
+                linewidth=1.5, markersize=4, zorder=5, label="mean")
+
+        ax.set_title(f"{task.upper()} — decode steps per block (per request)",
+                     fontsize=12, fontweight="bold")
+        ax.set_xlabel("Block index", fontsize=10)
+        ax.set_ylabel("Decode forward steps", fontsize=10)
+        ax.yaxis.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(fontsize=8)
+
+    fig.suptitle(
+        f"Decode steps per block index — {model_name}\n"
+        f"(line alpha: light=early request → dark=late request)",
+        fontsize=12,
+    )
+    fig.tight_layout()
+    out_path = Path(output_dir) / f"block_steps_per_request_{model_tag}.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"[plot] saved → {out_path}")
+    plt.close(fig)
+
+
 def plot_latency_metrics(
     latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]],
     model_name: str,
@@ -2253,6 +2338,7 @@ def main():
             )
             plot_avg_block_steps_per_request(latency_data, model_name=model, output_dir=args.output_dir)
             plot_tpob_by_block_index(latency_data, model_name=model, output_dir=args.output_dir)
+            plot_block_steps_per_request(latency_data, model_name=model, output_dir=args.output_dir)
             # takes too long time to make figure
             #plot_latency_metrics(latency_data, model_name=model, output_dir=args.output_dir)
 

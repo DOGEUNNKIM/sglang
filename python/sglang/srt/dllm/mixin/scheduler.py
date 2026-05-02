@@ -162,6 +162,7 @@ class SchedulerDllmMixin:
                     final_steps = int(block_steps[idx])
                 if final_steps > 0:
                     req.dllm_total_block_steps += final_steps
+                    req.dllm_block_steps_list.append(final_steps)
                     observed_rate = self.dllm_config.block_size / final_steps
                     alpha = self.dllm_config.ema_alpha
                     # Per-request EMA: captures per-request unmask rate variation.
@@ -246,6 +247,7 @@ class SchedulerDllmMixin:
             # Per-block intervals: index i = gap between block i and block i+1 (ms).
             # Length == num_output_blocks - 1.
             "tpob_list_ms": [v * 1000 for v in req.dllm_tpob_list],
+            "block_steps_list": list(req.dllm_block_steps_list),
             # mean inter-block scheduling delay (block ready → enters next batch)
             "decode_delay_s": decode_delay,
             "decode_delay_ms": None if decode_delay is None else decode_delay * 1000,

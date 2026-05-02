@@ -27,6 +27,7 @@ class ReqDllmMixin:
         self.dllm_tpob_sum = 0.0
         self.dllm_tpob_count = 0
         self.dllm_tpob_list: list[float] = []  # per-block intervals (s), index = block_idx - 1
+        self.dllm_block_steps_list: list[int] = []  # decode forward steps per output block
         self.dllm_output_block_count = 0
         self.dllm_latency_logged = False
         self.dllm_scheduled_source_phase: Optional[DllmReqPhase] = None
