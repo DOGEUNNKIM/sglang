@@ -6,7 +6,7 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_results}"
 BLOCK_SIZE="${BLOCK_SIZE:-32}"
 WARMUP="${WARMUP:-16}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
-REQUEST_RATES=(${REQUEST_RATES:-8 4 2}) #0.5 1 1.5
+REQUEST_RATES=(${REQUEST_RATES:-8}) #0.5 1 1.5
 TASKS=(${TASKS:-math gsm8k humaneval}) ##### TASK
 NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
@@ -121,8 +121,29 @@ wait_server_ready() {
 stop_server() {
     if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" >/dev/null 2>&1; then
         echo "[server] shutting down pid=${SERVER_PID}"
+        # Capture TP worker PIDs before killing master (they reparent to init afterward).
+        local child_pids
+        child_pids=$(pgrep -P "${SERVER_PID}" 2>/dev/null || true)
+
         kill "${SERVER_PID}" >/dev/null 2>&1 || true
+        # Wait up to 30 s for graceful shutdown; force-kill if it hangs (TP>1).
+        local deadline=$(( SECONDS + 30 ))
+        while kill -0 "${SERVER_PID}" >/dev/null 2>&1; do
+            if (( SECONDS >= deadline )); then
+                echo "[server] grace period expired, sending SIGKILL to ${SERVER_PID}"
+                kill -9 "${SERVER_PID}" >/dev/null 2>&1 || true
+                break
+            fi
+            sleep 1
+        done
         wait "${SERVER_PID}" >/dev/null 2>&1 || true
+        # Kill surviving TP workers / detokenizer so GPU memory is released.
+        if [[ -n "${child_pids}" ]]; then
+            echo "[server] killing surviving worker pids: ${child_pids}"
+            # shellcheck disable=SC2086
+            kill -9 ${child_pids} >/dev/null 2>&1 || true
+        fi
+        sleep 2  # let CUDA release memory before next server starts
     fi
     SERVER_PID=""
 }
@@ -161,6 +182,7 @@ for RATE in "${REQUEST_RATES[@]}"; do
             --max-running-requests "${MAX_RUNNING_REQUESTS}" \
             --cuda-graph-max-bs "${MAX_RUNNING_REQUESTS}" \
             --disable-cuda-graph-padding \
+            --tp-size 2 \
             >> /tmp/dlm_results/run_dlm_slo_server_log.txt 2>&1 &
         SERVER_PID=$!
 
@@ -180,6 +202,7 @@ for RATE in "${REQUEST_RATES[@]}"; do
             --warmup "${WARMUP}"
             --num-output-blocks "${NUM_OUTPUT_BLOCKS}"
             --output-dir "${OUT_DIR}"
+            --tp-size 2
         )
 
         if [[ -n "${NUM_EXAMPLES}" ]]; then

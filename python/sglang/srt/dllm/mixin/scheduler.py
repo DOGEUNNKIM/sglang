@@ -14,6 +14,7 @@ from sglang.srt.mem_cache.common import release_kv_cache
 from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.observability.req_time_stats import set_time_batch
+from sglang.srt.utils import broadcast_pyobj
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,7 @@ class SchedulerDllmMixin:
         self.dllm_manager.init_next_round()
         self._fetch_waiting_reqs()
         self._sort_dllm_by_laxity()
+        self._sync_dllm_lst_order_across_tp()
 
         # Process batches
         forward_mode = self._process_dllm_batches(adder)
@@ -614,6 +616,47 @@ class SchedulerDllmMixin:
         self.dllm_manager.waiting_queue.sort(
             key=lambda req: req.compute_dllm_slack(now)
         )
+
+    def _sync_dllm_lst_order_across_tp(self: Scheduler) -> None:
+        """Use TP0's LST order on all TP ranks.
+
+        LST slack depends on wall-clock time, cache-prefix observations, and EMA
+        state, any of which can drift slightly across TP ranks.  The forward
+        path requires every TP rank to schedule the same requests in the same
+        order, so broadcast only the sorted request ids and keep local Req
+        objects/resource checks unchanged.
+        """
+        if (
+            not self.dllm_config.use_lst()
+            or getattr(self, "tp_size", 1) == 1
+        ):
+            return
+
+        ordered_rids = [req.rid for req in self.dllm_manager.waiting_queue]
+        ordered_rids = broadcast_pyobj(
+            ordered_rids,
+            self.tp_group.rank,
+            self.tp_cpu_group,
+            src=self.tp_group.ranks[0],
+        )
+
+        req_by_rid = {req.rid: req for req in self.dllm_manager.waiting_queue}
+        synced_queue = [req_by_rid[rid] for rid in ordered_rids if rid in req_by_rid]
+        if len(synced_queue) != len(self.dllm_manager.waiting_queue):
+            logger.warning(
+                "DLM LST TP order sync saw mismatched waiting queues: "
+                "rank=%s local=%s broadcast=%s",
+                getattr(self, "tp_rank", None),
+                len(self.dllm_manager.waiting_queue),
+                len(ordered_rids),
+            )
+            synced_rids = {req.rid for req in synced_queue}
+            synced_queue.extend(
+                req
+                for req in self.dllm_manager.waiting_queue
+                if req.rid not in synced_rids
+            )
+        self.dllm_manager.waiting_queue = synced_queue
 
     def _should_skip_prefill(self: Scheduler) -> bool:
         """Check if DLLM prefill should be skipped."""
