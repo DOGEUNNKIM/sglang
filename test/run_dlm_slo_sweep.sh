@@ -7,7 +7,7 @@ BLOCK_SIZE="${BLOCK_SIZE:-32}"
 WARMUP="${WARMUP:-16}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 REQUEST_RATES=(${REQUEST_RATES:-8}) #0.5 1 1.5
-TASKS=(${TASKS:-gsm8k}) ##### TASK humaneval math
+TASKS=(${TASKS:-math}) ##### TASK humaneval math gsm8k
 NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
 PORT="${PORT:-30000}"
@@ -16,7 +16,9 @@ THRESHOLD="${THRESHOLD:-0.95}"
 NUM_THREADS="${NUM_THREADS:-200}"   ######################## DLLM max concurrent request
 DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-200}" ###### DLLM_WAITING_QUEUE
 SCHEDULER="${SCHEDULER:-LST}"               # LST | PREFILL | DECODE
-SLO_MULTIPLIER="${SLO_MULTIPLIER:-}"         # e.g. 5.0  → deadline = multiplier × ideal; used only when SCHEDULER=LST
+STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-5.0}"    # strict SLO = multiplier × ideal latency
+RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-25.0}" # release SLO = multiplier × ideal latency
+STRICT_PROB="${STRICT_PROB:-0.5}"               # fraction of requests assigned strict SLO
 FORWARD_TIME_S="${FORWARD_TIME_S:-0.030}"          # shared fallback (s)
 PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"  # override prefill fwd time (s)
 DECODE_FORWARD_TIME_S="${DECODE_FORWARD_TIME_S:-}"    # override decode fwd time (s)
@@ -82,27 +84,32 @@ print(f'{ttfb_ms*m/1000:.4f} {ideal_tpob_s*m:.4f} {unmask_per_fwd:.4f}')
 "
 }
 
-# write_dllm_config TTFB_SLO_S TPOB_SLO_S UNMASK_PER_FWD [LST_ENABLED]
-# All args are optional (empty = omit field from YAML).
-# LST_ENABLED: "false" disables LST scheduling while keeping SLO values for
-#   benchmark scatter-plot measurement; omit or "true" = LST active (default).
+# write_dllm_config STRICT_TTFB STRICT_TPOB RELEASE_TTFB RELEASE_TPOB UNMASK_PER_FWD [LST_ENABLED]
+# All SLO args are in seconds; empty = omit from YAML.
+# LST_ENABLED: "false" keeps SLO values for scatter-plot measurement but disables
+#   LST scheduling; omit or "true" = LST active (default).
 write_dllm_config() {
-    local _ttfb_slo="${1:-}"
-    local _tpob_slo="${2:-}"
+    local _strict_ttfb="${1:-}"
+    local _strict_tpob="${2:-}"
+    local _release_ttfb="${3:-}"
+    local _release_tpob="${4:-}"
     # Manual env var takes priority over the task-specific computed value
-    local _unmask_per_fwd="${EXPECTED_UNMASK_PER_FORWARD:-${3:-}}"
-    local _lst_enabled="${4:-}"
+    local _unmask_per_fwd="${EXPECTED_UNMASK_PER_FORWARD:-${5:-}}"
+    local _lst_enabled="${6:-}"
 
     cat > "${CONFIG_PATH}" <<EOF
 threshold: ${THRESHOLD}
 dllm_admission_window: ${DLLM_ADMISSION_WINDOW}
 forward_time_s: ${FORWARD_TIME_S}
+strict_prob: ${STRICT_PROB}
 step_log_file: ${STEP_LOG_FILE}
 request_latency_log_file: ${REQUEST_LATENCY_LOG_FILE}
 batch_latency_log_file: ${BATCH_LATENCY_LOG_FILE}
 EOF
-    [[ -n "${_ttfb_slo}" ]]              && echo "ttfb_slo: ${_ttfb_slo}"                               >> "${CONFIG_PATH}"
-    [[ -n "${_tpob_slo}" ]]              && echo "tpob_slo: ${_tpob_slo}"                               >> "${CONFIG_PATH}"
+    [[ -n "${_strict_ttfb}" ]]           && echo "strict_ttfb_slo: ${_strict_ttfb}"                     >> "${CONFIG_PATH}"
+    [[ -n "${_strict_tpob}" ]]           && echo "strict_tpob_slo: ${_strict_tpob}"                     >> "${CONFIG_PATH}"
+    [[ -n "${_release_ttfb}" ]]          && echo "release_ttfb_slo: ${_release_ttfb}"                   >> "${CONFIG_PATH}"
+    [[ -n "${_release_tpob}" ]]          && echo "release_tpob_slo: ${_release_tpob}"                   >> "${CONFIG_PATH}"
     [[ -n "${_unmask_per_fwd}" ]]        && echo "expected_unmask_per_forward: ${_unmask_per_fwd}"       >> "${CONFIG_PATH}"
     [[ -n "${PREFILL_FORWARD_TIME_S}" ]] && echo "prefill_forward_time_s: ${PREFILL_FORWARD_TIME_S}"     >> "${CONFIG_PATH}"
     [[ -n "${DECODE_FORWARD_TIME_S}" ]]  && echo "decode_forward_time_s: ${DECODE_FORWARD_TIME_S}"       >> "${CONFIG_PATH}"
@@ -171,20 +178,20 @@ for RATE in "${REQUEST_RATES[@]}"; do
             echo "[scheduler] DLLM_ADMISSION_WINDOW overridden to ${DLLM_ADMISSION_WINDOW}"
         fi
 
-        # Compute SLO reference values for all schedulers (used for scatter plot).
-        # LST also uses them as scheduling deadlines; PREFILL/DECODE do not.
-        _slo_vals=$(_compute_task_slo "${TASK}" "${SLO_MULTIPLIER}")
-        read -r _task_ttfb_slo _task_tpob_slo _task_unmask_per_fwd \
-            <<< "${_slo_vals}"
-        if [[ -n "${_slo_vals}" ]]; then
-            echo "[slo] task=${TASK}  ttfb_slo=${_task_ttfb_slo}s  tpob_slo=${_task_tpob_slo}s  unmask/fwd=${_task_unmask_per_fwd}  (${SLO_MULTIPLIER}× ideal)"
+        # Compute strict and release SLO values for all schedulers (scatter plot + LST deadlines).
+        _strict_vals=$(_compute_task_slo "${TASK}" "${STRICT_MULTIPLIER}")
+        _release_vals=$(_compute_task_slo "${TASK}" "${RELEASE_MULTIPLIER}")
+        read -r _strict_ttfb _strict_tpob _task_unmask_per_fwd <<< "${_strict_vals}"
+        read -r _release_ttfb _release_tpob _             <<< "${_release_vals}"
+        if [[ -n "${_strict_vals}" ]]; then
+            echo "[slo] task=${TASK}  strict=${_strict_ttfb}s/${_strict_tpob}s  release=${_release_ttfb}s/${_release_tpob}s  unmask/fwd=${_task_unmask_per_fwd}  (${STRICT_MULTIPLIER}×/${RELEASE_MULTIPLIER}× ideal)"
         fi
 
-        # lst_enabled: false tells server to skip LST scheduling even if SLO values are present.
+        # lst_enabled: false → SLO values written for scatter-plot only, no scheduling effect.
         _lst_enabled=""
         [[ "${SCHEDULER}" != "LST" ]] && _lst_enabled="false"
 
-        write_dllm_config "${_task_ttfb_slo:-}" "${_task_tpob_slo:-}" "${_task_unmask_per_fwd:-}" "${_lst_enabled}"
+        write_dllm_config "${_strict_ttfb:-}" "${_strict_tpob:-}" "${_release_ttfb:-}" "${_release_tpob:-}" "${_task_unmask_per_fwd:-}" "${_lst_enabled}"
         echo "===== request_rate=${RATE} task=${TASK} =====" >> /tmp/dlm_results/run_dlm_slo_server_log.txt
 
         PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.6 \

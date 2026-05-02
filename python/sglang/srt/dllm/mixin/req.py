@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import enum
 import math
+import random
 from typing import TYPE_CHECKING, Optional
 
 from sglang.srt.dllm.config import DllmConfig
@@ -50,9 +51,10 @@ class ReqDllmMixin:
         # prefill→first_unmask gap: time from last prefill forward → first unmask batch
         self.dllm_prefill_end_time: Optional[float] = None
         self.dllm_first_unmask_gap: Optional[float] = None
-        # LST scheduling: per-phase deadline and admission timestamp
+        # LST scheduling: per-phase deadline, admission timestamp, and assigned SLO tier
         self.dllm_current_deadline: Optional[float] = None
         self.dllm_admission_time: Optional[float] = None
+        self.dllm_slo_type: Optional[str] = None  # "strict" or "release"
         # Prefix length from a lightweight cache peek done in _fetch_waiting_reqs
         # before the request is fully scheduled.  Used only in compute_dllm_slack
         # so that cache hits are reflected in remaining_prefill even before
@@ -75,22 +77,28 @@ class ReqDllmMixin:
     def is_dllm(self: Req) -> bool:
         return self.dllm_config is not None
 
+    def _get_tpob_slo(self: Req) -> Optional[float]:
+        """Return the per-request TPOB SLO (seconds) based on assigned SLO tier."""
+        cfg = self.dllm_config
+        if cfg is None or self.dllm_slo_type is None:
+            return None
+        return cfg.strict_tpob_slo if self.dllm_slo_type == "strict" else cfg.release_tpob_slo
+
     def record_dllm_block_emit_time(self: Req, ts: float) -> None:
         if self.dllm_first_block_time is None:
             self.dllm_first_block_time = ts
             # Switch from TTFB deadline to TPOB deadline
-            if self.dllm_config is not None and self.dllm_config.tpob_slo is not None:
-                self.dllm_current_deadline = ts + self.dllm_config.tpob_slo
-            else:
-                self.dllm_current_deadline = None
+            tpob_slo = self._get_tpob_slo()
+            self.dllm_current_deadline = ts + tpob_slo if tpob_slo is not None else None
         elif self.dllm_last_block_time is not None:
             interval = ts - self.dllm_last_block_time
             self.dllm_tpob_sum += interval
             self.dllm_tpob_count += 1
             self.dllm_tpob_list.append(interval)
             # Refresh TPOB deadline for the next block
-            if self.dllm_config is not None and self.dllm_config.tpob_slo is not None:
-                self.dllm_current_deadline = ts + self.dllm_config.tpob_slo
+            tpob_slo = self._get_tpob_slo()
+            if tpob_slo is not None:
+                self.dllm_current_deadline = ts + tpob_slo
 
         self.dllm_last_block_time = ts
         self.dllm_output_block_count += 1
@@ -114,8 +122,14 @@ class ReqDllmMixin:
             arrival = ts  # Fallback: DLLM admission time
 
         self.dllm_admission_time = arrival
-        if self.dllm_config is not None and self.dllm_config.ttfb_slo is not None:
-            self.dllm_current_deadline = arrival + self.dllm_config.ttfb_slo
+        if self.dllm_config is not None and self.dllm_config.use_lst():
+            cfg = self.dllm_config
+            self.dllm_slo_type = "strict" if random.random() < cfg.strict_prob else "release"
+            ttfb_slo = (
+                cfg.strict_ttfb_slo if self.dllm_slo_type == "strict" else cfg.release_ttfb_slo
+            )
+            if ttfb_slo is not None:
+                self.dllm_current_deadline = arrival + ttfb_slo
 
     def compute_dllm_slack(self: Req, now: float) -> float:
         """Remaining slack = deadline - now - estimated remaining compute.

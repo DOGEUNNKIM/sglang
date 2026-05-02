@@ -257,6 +257,7 @@ class SchedulerDllmMixin:
             # time from entering waiting_queue to first forward pass
             "sched_wait_s": sched_wait_s,
             "sched_wait_ms": None if sched_wait_s is None else sched_wait_s * 1000,
+            "slo_type": req.dllm_slo_type,
         }
         with open(log_file, "a") as f:
             f.write(json.dumps(record) + "\n")

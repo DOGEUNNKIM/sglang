@@ -13,8 +13,11 @@ class DllmConfig:
         mask_id: int,
         max_running_requests: int,
         admission_window: int | None = None,
-        ttfb_slo: float | None = None,
-        tpob_slo: float | None = None,
+        strict_ttfb_slo: float | None = None,
+        strict_tpob_slo: float | None = None,
+        release_ttfb_slo: float | None = None,
+        release_tpob_slo: float | None = None,
+        strict_prob: float = 0.5,
         lst_enabled: bool = True,
         prefill_forward_time_s: float = 0.030,
         decode_forward_time_s: float = 0.030,
@@ -26,8 +29,11 @@ class DllmConfig:
         self.mask_id = mask_id
         self.max_running_requests = max_running_requests
         self.admission_window = admission_window or max_running_requests
-        self.ttfb_slo = ttfb_slo
-        self.tpob_slo = tpob_slo
+        self.strict_ttfb_slo = strict_ttfb_slo
+        self.strict_tpob_slo = strict_tpob_slo
+        self.release_ttfb_slo = release_ttfb_slo
+        self.release_tpob_slo = release_tpob_slo
+        self.strict_prob = max(0.0, min(1.0, strict_prob))
         self.lst_enabled = lst_enabled
         self.prefill_forward_time_s = prefill_forward_time_s
         self.decode_forward_time_s = decode_forward_time_s
@@ -69,7 +75,7 @@ class DllmConfig:
 
     def use_lst(self) -> bool:
         """True if Least Slack Time scheduling is enabled."""
-        return self.lst_enabled and (self.ttfb_slo is not None or self.tpob_slo is not None)
+        return self.lst_enabled and self.strict_ttfb_slo is not None
 
     @staticmethod
     def from_server_args(
@@ -124,10 +130,15 @@ class DllmConfig:
         #if admission_window < max_running_requests:
         #    admission_window = max_running_requests
 
-        ttfb_slo_raw = algorithm_config.get("ttfb_slo", None)
-        tpob_slo_raw = algorithm_config.get("tpob_slo", None)
-        ttfb_slo = float(ttfb_slo_raw) if ttfb_slo_raw is not None else None
-        tpob_slo = float(tpob_slo_raw) if tpob_slo_raw is not None else None
+        def _parse_slo(key: str) -> float | None:
+            raw = algorithm_config.get(key)
+            return float(raw) if raw is not None else None
+
+        strict_ttfb_slo = _parse_slo("strict_ttfb_slo")
+        strict_tpob_slo = _parse_slo("strict_tpob_slo")
+        release_ttfb_slo = _parse_slo("release_ttfb_slo")
+        release_tpob_slo = _parse_slo("release_tpob_slo")
+        strict_prob = float(algorithm_config.get("strict_prob", 0.5))
         lst_enabled = bool(algorithm_config.get("lst_enabled", True))
 
         # forward_time_s is a shared fallback; prefill/decode can be set separately.
@@ -149,8 +160,11 @@ class DllmConfig:
             mask_id=mask_id,
             max_running_requests=max_running_requests,
             admission_window=admission_window,
-            ttfb_slo=ttfb_slo,
-            tpob_slo=tpob_slo,
+            strict_ttfb_slo=strict_ttfb_slo,
+            strict_tpob_slo=strict_tpob_slo,
+            release_ttfb_slo=release_ttfb_slo,
+            release_tpob_slo=release_tpob_slo,
+            strict_prob=strict_prob,
             lst_enabled=lst_enabled,
             prefill_forward_time_s=prefill_forward_time_s,
             decode_forward_time_s=decode_forward_time_s,

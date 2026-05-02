@@ -668,7 +668,19 @@ def _values(records: List[Dict[str, Any]], key: str) -> List[float]:
 def _read_dllm_slo_config(config_path: Optional[str] = None) -> Dict[str, Optional[float]]:
     """Read active DLM SLOs from the YAML-like config written by the sweep script."""
     config_path = config_path or os.environ.get("CONFIG_PATH", "/tmp/dlm_algo_config.yaml")
-    slo = {"ttfb_slo_ms": None, "tpob_slo_ms": None}
+    slo: Dict[str, Optional[float]] = {
+        "strict_ttfb_slo_ms": None,
+        "strict_tpob_slo_ms": None,
+        "release_ttfb_slo_ms": None,
+        "release_tpob_slo_ms": None,
+        "strict_prob": None,
+    }
+    _slo_s_keys = {
+        "strict_ttfb_slo": "strict_ttfb_slo_ms",
+        "strict_tpob_slo": "strict_tpob_slo_ms",
+        "release_ttfb_slo": "release_ttfb_slo_ms",
+        "release_tpob_slo": "release_tpob_slo_ms",
+    }
     try:
         with open(config_path) as f:
             for line in f:
@@ -677,10 +689,10 @@ def _read_dllm_slo_config(config_path: Optional[str] = None) -> Dict[str, Option
                 key, value = line.split(":", 1)
                 key = key.strip()
                 value = value.strip()
-                if key == "ttfb_slo":
-                    slo["ttfb_slo_ms"] = float(value) * 1000.0
-                elif key == "tpob_slo":
-                    slo["tpob_slo_ms"] = float(value) * 1000.0
+                if key in _slo_s_keys:
+                    slo[_slo_s_keys[key]] = float(value) * 1000.0
+                elif key == "strict_prob":
+                    slo["strict_prob"] = float(value)
     except FileNotFoundError:
         pass
     except ValueError as e:
@@ -1483,14 +1495,18 @@ def plot_request_slo_scatter(
     model_name: str,
     output_dir: str,
 ):
-    """Scatter requests by normalized TTFB/TPOB against their SLOs."""
+    """Scatter requests by normalised TTFB/TPOB against per-request SLO tier.
+
+    Each point is normalised by its own SLO (strict or release) so both tiers
+    share the same (0,1) decision boundary.  Points are colour-coded by tier.
+    """
     import matplotlib.pyplot as plt
     import numpy as np
 
     tasks = []
     for task, data in latency_data.items():
         slo = slo_data.get(task, {})
-        if slo.get("ttfb_slo_ms") is None or slo.get("tpob_slo_ms") is None:
+        if slo.get("strict_ttfb_slo_ms") is None or slo.get("strict_tpob_slo_ms") is None:
             continue
         if any(
             r.get("ttfb_ms") is not None and r.get("tpob_ms") is not None
@@ -1501,8 +1517,16 @@ def plot_request_slo_scatter(
         print("[plot] no request records with both TTFB/TPOB SLOs — skipping")
         return
 
-    colors = {"gsm8k": "#4C72B0", "humaneval": "#DD8452", "math": "#55A868"}
     model_tag = model_name.replace("/", "_")
+    # Tier colour: strict=blue, release=green, unknown=grey
+    TIER_COLOR = {"strict": "#4C72B0", "release": "#55A868", "unknown": "#999999"}
+    # Outcome style: same tier colour, different alpha + marker
+    OUTCOME_STYLE = {
+        "ok":        {"alpha": 0.65, "marker": "o", "s": 14},
+        "ttfb_miss": {"alpha": 0.25, "marker": ">", "s": 20},
+        "tpob_miss": {"alpha": 0.25, "marker": "^", "s": 20},
+        "both_miss": {"alpha": 0.25, "marker": "x", "s": 24},
+    }
 
     fig, axes = plt.subplots(1, len(tasks), figsize=(5.8 * len(tasks), 5), sharex=False, sharey=False)
     if len(tasks) == 1:
@@ -1510,70 +1534,228 @@ def plot_request_slo_scatter(
 
     for ax, task in zip(axes, tasks):
         records = _unique_request_records(latency_data[task].get("request", []))
-        ttfb_slo_ms = float(slo_data[task]["ttfb_slo_ms"])
-        tpob_slo_ms = float(slo_data[task]["tpob_slo_ms"])
+        slo = slo_data[task]
+        strict_ttfb = float(slo["strict_ttfb_slo_ms"])
+        strict_tpob = float(slo["strict_tpob_slo_ms"])
+        release_ttfb = float(slo.get("release_ttfb_slo_ms") or strict_ttfb)
+        release_tpob = float(slo.get("release_tpob_slo_ms") or strict_tpob)
+        strict_prob  = slo.get("strict_prob")
 
-        points = [
-            (float(r["ttfb_ms"]) / ttfb_slo_ms, float(r["tpob_ms"]) / tpob_slo_ms)
-            for r in records
-            if r.get("ttfb_ms") is not None and r.get("tpob_ms") is not None
-        ]
-        if not points:
-            ax.text(0.5, 0.5, "No data", ha="center", va="center",
-                    transform=ax.transAxes)
+        # Normalise each point by its own SLO tier
+        tier_points: Dict[str, list] = {"strict": [], "release": [], "unknown": []}
+        for r in records:
+            ttfb_ms = r.get("ttfb_ms")
+            tpob_ms = r.get("tpob_ms")
+            if ttfb_ms is None or tpob_ms is None:
+                continue
+            tier = r.get("slo_type") or "unknown"
+            t_ttfb = strict_ttfb if tier == "strict" else release_ttfb
+            t_tpob = strict_tpob if tier == "strict" else release_tpob
+            tier_points[tier].append((float(ttfb_ms) / t_ttfb, float(tpob_ms) / t_tpob))
+
+        all_points = [p for pts in tier_points.values() for p in pts]
+        if not all_points:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
             continue
 
-        arr = np.array(points)
-        x = arr[:, 0]
-        y = arr[:, 1]
-        both_ok = (x <= 1.0) & (y <= 1.0)
-        ttfb_only_bad = (x > 1.0) & (y <= 1.0)
-        tpob_only_bad = (x <= 1.0) & (y > 1.0)
-        both_bad = (x > 1.0) & (y > 1.0)
-
-        color = colors.get(task, "#777")
-        ax.scatter(x[both_ok], y[both_ok], s=14, alpha=0.55, color=color, label="both ok")
-        ax.scatter(x[ttfb_only_bad], y[ttfb_only_bad], s=18, alpha=0.75,
-                   color="#C44E52", marker=">", label="TTFB miss")
-        ax.scatter(x[tpob_only_bad], y[tpob_only_bad], s=18, alpha=0.75,
-                   color="#8172B2", marker="^", label="TPOB miss")
-        ax.scatter(x[both_bad], y[both_bad], s=22, alpha=0.8,
-                   color="#222222", marker="x", label="both miss")
+        for tier, pts in tier_points.items():
+            if not pts:
+                continue
+            arr = np.array(pts)
+            x, y = arr[:, 0], arr[:, 1]
+            color = TIER_COLOR[tier]
+            outcomes = {
+                "ok":        (x <= 1.0) & (y <= 1.0),
+                "ttfb_miss": (x >  1.0) & (y <= 1.0),
+                "tpob_miss": (x <= 1.0) & (y >  1.0),
+                "both_miss": (x >  1.0) & (y >  1.0),
+            }
+            for outcome, mask in outcomes.items():
+                if not mask.any():
+                    continue
+                st = OUTCOME_STYLE[outcome]
+                ax.scatter(
+                    x[mask], y[mask],
+                    s=st["s"], alpha=st["alpha"], color=color,
+                    marker=st["marker"], label=f"{tier} {outcome}",
+                )
 
         ax.axvline(1.0, color="black", linestyle="--", linewidth=1.0)
         ax.axhline(1.0, color="black", linestyle="--", linewidth=1.0)
-        ax.set_title(f"{task.upper()} — request SLO map",
-                     fontsize=12, fontweight="bold")
-        ax.set_xlabel("TTFB / TTFB SLO", fontsize=10)
-        ax.set_ylabel("Mean TPOB / TPOB SLO", fontsize=10)
+        ax.set_title(f"{task.upper()} — request SLO map", fontsize=12, fontweight="bold")
+        ax.set_xlabel("TTFB / TTFB SLO (per-tier)", fontsize=10)
+        ax.set_ylabel("Mean TPOB / TPOB SLO (per-tier)", fontsize=10)
         ax.grid(True, linestyle="--", alpha=0.35)
         ax.legend(fontsize=7, loc="upper right")
 
-        max_x = max(1.05, float(np.percentile(x, 99)) * 1.08)
-        max_y = max(1.05, float(np.percentile(y, 99)) * 1.08)
+        all_arr = np.array(all_points)
+        max_x = max(1.05, float(np.percentile(all_arr[:, 0], 99)) * 1.08)
+        max_y = max(1.05, float(np.percentile(all_arr[:, 1], 99)) * 1.08)
         ax.set_xlim(0, max_x)
         ax.set_ylim(0, max_y)
 
-        total = len(x)
-        ok_count = int(np.sum(both_ok))
+        n_strict  = len(tier_points["strict"])
+        n_release = len(tier_points["release"])
+        n_total   = len(all_points)
+        ok_strict  = sum(1 for x, y in tier_points["strict"]  if x <= 1.0 and y <= 1.0)
+        ok_release = sum(1 for x, y in tier_points["release"] if x <= 1.0 and y <= 1.0)
+        prob_str = f"strict_prob={strict_prob:.2f}\n" if strict_prob is not None else ""
         ax.text(
             0.03, 0.97,
-            f"n={total}\n"
-            f"SLO ok={ok_count / total * 100:.1f}%\n"
-            f"TTFB SLO={ttfb_slo_ms:.1f} ms\n"
-            f"TPOB SLO={tpob_slo_ms:.1f} ms\n"
-            f"p95 x={np.percentile(x, 95):.2f}\n"
-            f"p95 y={np.percentile(y, 95):.2f}",
-            transform=ax.transAxes,
-            fontsize=8,
-            va="top",
-            ha="left",
+            f"n={n_total} ({n_strict}s/{n_release}r)\n"
+            f"{prob_str}"
+            f"strict ok={ok_strict/n_strict*100:.1f}%  ({strict_ttfb:.0f}/{strict_tpob:.0f} ms)\n"
+            f"release ok={ok_release/n_release*100:.1f}%  ({release_ttfb:.0f}/{release_tpob:.0f} ms)"
+            if n_strict > 0 and n_release > 0 else
+            f"n={n_total}\nstrict={strict_ttfb:.0f}/{strict_tpob:.0f} ms\nrelease={release_ttfb:.0f}/{release_tpob:.0f} ms",
+            transform=ax.transAxes, fontsize=8, va="top", ha="left",
             bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75),
         )
 
     fig.suptitle(f"Request distribution against TTFB/TPOB SLO — {model_name}", fontsize=13)
     fig.tight_layout()
     out_path = Path(output_dir) / f"request_slo_scatter_{model_tag}.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"[plot] saved → {out_path}")
+    plt.close(fig)
+
+
+def plot_request_raw_scatter(
+    latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]],
+    slo_data: Dict[str, Dict[str, Optional[float]]],
+    model_name: str,
+    output_dir: str,
+):
+    """Scatter requests by raw TTFB (ms) vs mean TPOB (ms).
+
+    Tier colour and outcome marker/alpha follow the same scheme as
+    plot_request_slo_scatter.  SLO reference lines are drawn at the
+    per-tier absolute thresholds so you can read off the raw latency directly.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    tasks = []
+    for task, data in latency_data.items():
+        if any(
+            r.get("ttfb_ms") is not None and r.get("tpob_ms") is not None
+            for r in data.get("request", [])
+        ):
+            tasks.append(task)
+    if not tasks:
+        print("[plot] no request records with TTFB/TPOB — skipping raw scatter")
+        return
+
+    model_tag = model_name.replace("/", "_")
+    TIER_COLOR = {"strict": "#4C72B0", "release": "#55A868", "unknown": "#999999"}
+    OUTCOME_STYLE = {
+        "ok":        {"alpha": 0.65, "marker": "o", "s": 14},
+        "ttfb_miss": {"alpha": 0.25, "marker": ">", "s": 20},
+        "tpob_miss": {"alpha": 0.25, "marker": "^", "s": 20},
+        "both_miss": {"alpha": 0.25, "marker": "x", "s": 24},
+    }
+
+    fig, axes = plt.subplots(1, len(tasks), figsize=(5.8 * len(tasks), 5), sharex=False, sharey=False)
+    if len(tasks) == 1:
+        axes = [axes]
+
+    for ax, task in zip(axes, tasks):
+        records = _unique_request_records(latency_data[task].get("request", []))
+        slo = slo_data.get(task, {})
+        strict_ttfb = slo.get("strict_ttfb_slo_ms")
+        strict_tpob = slo.get("strict_tpob_slo_ms")
+        release_ttfb = slo.get("release_ttfb_slo_ms")
+        release_tpob = slo.get("release_tpob_slo_ms")
+        strict_prob  = slo.get("strict_prob")
+        has_slo = strict_ttfb is not None and strict_tpob is not None
+
+        tier_points: Dict[str, list] = {"strict": [], "release": [], "unknown": []}
+        for r in records:
+            ttfb_ms = r.get("ttfb_ms")
+            tpob_ms = r.get("tpob_ms")
+            if ttfb_ms is None or tpob_ms is None:
+                continue
+            tier = (r.get("slo_type") or "unknown") if has_slo else "unknown"
+            tier_points[tier].append((float(ttfb_ms), float(tpob_ms)))
+
+        all_points = [p for pts in tier_points.values() for p in pts]
+        if not all_points:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+            continue
+
+        for tier, pts in tier_points.items():
+            if not pts:
+                continue
+            arr = np.array(pts)
+            x, y = arr[:, 0], arr[:, 1]
+            color = TIER_COLOR[tier]
+            if has_slo:
+                t_ttfb = float(strict_ttfb if tier == "strict" else (release_ttfb or strict_ttfb))
+                t_tpob = float(strict_tpob if tier == "strict" else (release_tpob or strict_tpob))
+                outcomes = {
+                    "ok":        (x <= t_ttfb) & (y <= t_tpob),
+                    "ttfb_miss": (x >  t_ttfb) & (y <= t_tpob),
+                    "tpob_miss": (x <= t_ttfb) & (y >  t_tpob),
+                    "both_miss": (x >  t_ttfb) & (y >  t_tpob),
+                }
+            else:
+                outcomes = {"ok": np.ones(len(x), dtype=bool)}
+            for outcome, mask in outcomes.items():
+                if not mask.any():
+                    continue
+                st = OUTCOME_STYLE[outcome]
+                ax.scatter(
+                    x[mask], y[mask],
+                    s=st["s"], alpha=st["alpha"], color=color,
+                    marker=st["marker"], label=f"{tier} {outcome}",
+                )
+
+        if has_slo:
+            ax.axvline(float(strict_ttfb), color=TIER_COLOR["strict"],  linestyle="--", linewidth=1.0, label=f"strict TTFB SLO={strict_ttfb:.0f}ms")
+            ax.axhline(float(strict_tpob), color=TIER_COLOR["strict"],  linestyle=":",  linewidth=1.0, label=f"strict TPOB SLO={strict_tpob:.0f}ms")
+            if release_ttfb is not None:
+                ax.axvline(float(release_ttfb), color=TIER_COLOR["release"], linestyle="--", linewidth=1.0, label=f"release TTFB SLO={release_ttfb:.0f}ms")
+            if release_tpob is not None:
+                ax.axhline(float(release_tpob), color=TIER_COLOR["release"], linestyle=":",  linewidth=1.0, label=f"release TPOB SLO={release_tpob:.0f}ms")
+
+        ax.set_title(f"{task.upper()} — request raw latency", fontsize=12, fontweight="bold")
+        ax.set_xlabel("TTFB (ms)", fontsize=10)
+        ax.set_ylabel("Mean TPOB (ms)", fontsize=10)
+        ax.grid(True, linestyle="--", alpha=0.35)
+        ax.legend(fontsize=7, loc="upper right")
+
+        all_arr = np.array(all_points)
+        max_x = float(np.percentile(all_arr[:, 0], 99)) * 1.08
+        max_y = float(np.percentile(all_arr[:, 1], 99)) * 1.08
+        ax.set_xlim(0, max_x)
+        ax.set_ylim(0, max_y)
+
+        n_strict  = len(tier_points["strict"])
+        n_release = len(tier_points["release"])
+        n_total   = len(all_points)
+        if has_slo and n_strict > 0 and n_release > 0:
+            ok_strict  = sum(1 for px, py in tier_points["strict"]  if px <= float(strict_ttfb) and py <= float(strict_tpob))
+            ok_release = sum(1 for px, py in tier_points["release"] if px <= float(release_ttfb or strict_ttfb) and py <= float(release_tpob or strict_tpob))
+            prob_str = f"strict_prob={strict_prob:.2f}\n" if strict_prob is not None else ""
+            ax.text(
+                0.03, 0.97,
+                f"n={n_total} ({n_strict}s/{n_release}r)\n"
+                f"{prob_str}"
+                f"strict ok={ok_strict/n_strict*100:.1f}%  ({strict_ttfb:.0f}/{strict_tpob:.0f} ms)\n"
+                f"release ok={ok_release/n_release*100:.1f}%  ({float(release_ttfb or strict_ttfb):.0f}/{float(release_tpob or strict_tpob):.0f} ms)",
+                transform=ax.transAxes, fontsize=8, va="top", ha="left",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75),
+            )
+        else:
+            ax.text(
+                0.03, 0.97, f"n={n_total}",
+                transform=ax.transAxes, fontsize=8, va="top", ha="left",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75),
+            )
+
+    fig.suptitle(f"Request raw TTFB / TPOB — {model_name}", fontsize=13)
+    fig.tight_layout()
+    out_path = Path(output_dir) / f"request_raw_scatter_{model_tag}.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"[plot] saved → {out_path}")
     plt.close(fig)
@@ -2331,6 +2513,12 @@ def main():
             plot_ttfb_per_request(latency_data, model_name=model, output_dir=args.output_dir)
             plot_tpob_per_request(latency_data, model_name=model, output_dir=args.output_dir)
             plot_request_slo_scatter(
+                latency_data,
+                slo_data=slo_data,
+                model_name=model,
+                output_dir=args.output_dir,
+            )
+            plot_request_raw_scatter(
                 latency_data,
                 slo_data=slo_data,
                 model_name=model,
