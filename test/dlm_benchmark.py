@@ -1440,6 +1440,91 @@ def plot_tpob_per_request(
     plt.close(fig)
 
 
+def plot_avg_block_steps_per_request(
+    latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]],
+    model_name: str,
+    output_dir: str,
+):
+    """Scatter + running-mean of avg decode forward steps per block, per request."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    tasks = [
+        task
+        for task, data in latency_data.items()
+        if any("avg_block_steps" in r and r["avg_block_steps"] is not None
+               for r in data.get("request", []))
+    ]
+    if not tasks:
+        print("[plot] no avg_block_steps data in request latency log — skipping")
+        return
+
+    colors = {"gsm8k": "#4C72B0", "humaneval": "#DD8452", "math": "#55A868"}
+    model_tag = model_name.replace("/", "_")
+
+    fig, axes = plt.subplots(1, len(tasks), figsize=(7 * len(tasks), 4), sharey=False)
+    if len(tasks) == 1:
+        axes = [axes]
+
+    for ax, task in zip(axes, tasks):
+        records = latency_data[task].get("request", [])
+        vals = [
+            r["avg_block_steps"]
+            for r in records
+            if "avg_block_steps" in r and r["avg_block_steps"] is not None
+        ]
+        if not vals:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                    transform=ax.transAxes)
+            continue
+
+        color = colors.get(task, "#777")
+        x = np.arange(len(vals))
+        arr = np.array(vals)
+
+        ax.scatter(x, arr, color=color, s=8, alpha=0.5, label="avg steps/block")
+
+        window = max(1, len(arr) // 20)
+        kernel = np.ones(window) / window
+        running_mean = np.convolve(arr, kernel, mode="valid")
+        offset = window // 2
+        ax.plot(x[offset: offset + len(running_mean)], running_mean,
+                color="black", linewidth=1.5, label=f"running mean (w={window})")
+
+        mean_v = float(np.mean(arr))
+        p95_v  = float(np.percentile(arr, 95))
+        ax.axhline(mean_v, color="red",    linestyle="--", linewidth=1.0,
+                   label=f"mean={mean_v:.2f}")
+        ax.axhline(p95_v,  color="orange", linestyle=":",  linewidth=1.0,
+                   label=f"p95={p95_v:.2f}")
+
+        ax.set_title(f"{task.upper()} — avg decode steps per block",
+                     fontsize=12, fontweight="bold")
+        ax.set_xlabel("Request index (completion order)", fontsize=10)
+        ax.set_ylabel("Avg decode forward steps / block", fontsize=10)
+        ax.yaxis.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(fontsize=8)
+        ax.text(
+            0.97, 0.97,
+            f"n={len(arr)}\nmean={mean_v:.2f}\n"
+            f"p50={np.percentile(arr, 50):.2f}\n"
+            f"p95={p95_v:.2f}\n"
+            f"p99={np.percentile(arr, 99):.2f}",
+            transform=ax.transAxes, fontsize=8, va="top", ha="right",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
+        )
+
+    fig.suptitle(
+        f"Avg decode forward steps per block (completion order) — {model_name}",
+        fontsize=13,
+    )
+    fig.tight_layout()
+    out_path = Path(output_dir) / f"avg_block_steps_per_request_{model_tag}.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"[plot] saved → {out_path}")
+    plt.close(fig)
+
+
 def plot_tpob_by_block_index(
     latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]],
     model_name: str,
@@ -2018,6 +2103,7 @@ def main():
             plot_scheduling_delays(latency_data, model_name=model, output_dir=args.output_dir)
             plot_ttfb_per_request(latency_data, model_name=model, output_dir=args.output_dir)
             plot_tpob_per_request(latency_data, model_name=model, output_dir=args.output_dir)
+            plot_avg_block_steps_per_request(latency_data, model_name=model, output_dir=args.output_dir)
             plot_tpob_by_block_index(latency_data, model_name=model, output_dir=args.output_dir)
             # takes too long time to make figure
             #plot_latency_metrics(latency_data, model_name=model, output_dir=args.output_dir)

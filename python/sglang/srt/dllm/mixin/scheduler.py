@@ -150,6 +150,27 @@ class SchedulerDllmMixin:
                 req.output_ids.extend(next_token_ids)
                 req.check_finished(new_accepted_len=new_tokens)
                 self._commit_dllm_saved_block_prefix(req)
+
+                # Resolve final step count for this completed block.
+                # Prefer block_steps[idx] from the result (may be updated in the
+                # final step even when updated_ids[idx] is None); fall back to the
+                # accumulated req field.
+                final_steps = req.dllm_active_block_steps
+                if idx < len(block_steps) and block_steps[idx] is not None:
+                    final_steps = int(block_steps[idx])
+                if final_steps > 0:
+                    req.dllm_total_block_steps += final_steps
+                    observed_rate = self.dllm_config.block_size / final_steps
+                    alpha = self.dllm_config.ema_alpha
+                    # Per-request EMA: captures per-request unmask rate variation.
+                    req.dllm_ema_unmask_per_fwd = (
+                        (1.0 - alpha) * req.dllm_ema_unmask_per_fwd
+                        + alpha * observed_rate
+                    )
+                    # Global EMA: warm-start for future requests.
+                    if self.dllm_config.use_lst():
+                        self.dllm_config.update_ema_unmask(observed_rate)
+
                 req.clear_dllm_active_block()
                 has_output = True
 
@@ -165,6 +186,18 @@ class SchedulerDllmMixin:
             if has_output or has_finished:
                 self.stream_output(batch.reqs, batch.return_logprob)
             self.token_to_kv_pool_allocator.free_group_end()
+
+        # EMA: update forward time for pure prefill or decode batches.
+        # Mixed batches are skipped — forward time cannot be cleanly attributed.
+        if self.dllm_config.use_lst():
+            forward_time_s = block_emit_time - getattr(
+                batch, "dllm_forward_start_time", block_emit_time
+            )
+            if forward_time_s > 0:
+                self.dllm_config.update_ema_forward_time(
+                    forward_time_s,
+                    getattr(batch, "dllm_batch_phase", None),
+                )
 
         can_run_cuda_graph = getattr(result, "can_run_cuda_graph", False)
         self._maybe_log_dllm_batch_metrics(batch, result)
@@ -196,6 +229,12 @@ class SchedulerDllmMixin:
             "output_len": len(req.output_ids),
             "block_size": self.dllm_config.block_size,
             "num_output_blocks": req.dllm_output_block_count,
+            # average decode forward steps per output block (total_steps / num_blocks)
+            "avg_block_steps": (
+                req.dllm_total_block_steps / req.dllm_output_block_count
+                if req.dllm_output_block_count > 0
+                else None
+            ),
             "ttfb_s": ttfb,
             "ttfb_ms": None if ttfb is None else ttfb * 1000,
             # TPOB is the mean of adjacent output-block intervals.

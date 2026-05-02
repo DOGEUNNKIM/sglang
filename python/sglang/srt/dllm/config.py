@@ -31,6 +31,40 @@ class DllmConfig:
         self.decode_forward_time_s = decode_forward_time_s
         self.expected_unmask_per_forward = max(expected_unmask_per_forward, 1e-6)
 
+        # EMA-corrected estimates (initialised to static config values).
+        # Updated at runtime in process_batch_result_dllm; used by compute_dllm_slack.
+        self.ema_alpha: float = float(algorithm_config.get("ema_alpha", 0.1))
+        self.ema_unmask_per_forward: float = self.expected_unmask_per_forward
+        self.ema_decode_forward_time_s: float = decode_forward_time_s
+        self.ema_prefill_forward_time_s: float = prefill_forward_time_s
+
+    def update_ema_unmask(self, observed: float) -> None:
+        """EMA-update the expected unmask tokens per decode forward pass."""
+        self.ema_unmask_per_forward = (
+            (1.0 - self.ema_alpha) * self.ema_unmask_per_forward
+            + self.ema_alpha * max(observed, 1e-6)
+        )
+
+    def update_ema_forward_time(self, observed_s: float, phase: str) -> None:
+        """EMA-update decode or prefill forward time.
+
+        Mixed batches are skipped — forward time cannot be cleanly attributed.
+        Observations more than 5× the current EMA are treated as outliers
+        (e.g. GC pauses, preemption) and dropped.
+        """
+        if phase == "decode":
+            if observed_s <= 5.0 * self.ema_decode_forward_time_s:
+                self.ema_decode_forward_time_s = (
+                    (1.0 - self.ema_alpha) * self.ema_decode_forward_time_s
+                    + self.ema_alpha * observed_s
+                )
+        elif phase == "prefill":
+            if observed_s <= 5.0 * self.ema_prefill_forward_time_s:
+                self.ema_prefill_forward_time_s = (
+                    (1.0 - self.ema_alpha) * self.ema_prefill_forward_time_s
+                    + self.ema_alpha * observed_s
+                )
+
     def use_lst(self) -> bool:
         """True if Least Slack Time scheduling is enabled."""
         return self.ttfb_slo is not None or self.tpob_slo is not None
