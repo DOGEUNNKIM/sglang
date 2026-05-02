@@ -665,6 +665,43 @@ def _values(records: List[Dict[str, Any]], key: str) -> List[float]:
     ]
 
 
+def _read_dllm_slo_config(config_path: Optional[str] = None) -> Dict[str, Optional[float]]:
+    """Read active DLM SLOs from the YAML-like config written by the sweep script."""
+    config_path = config_path or os.environ.get("CONFIG_PATH", "/tmp/dlm_algo_config.yaml")
+    slo = {"ttfb_slo_ms": None, "tpob_slo_ms": None}
+    try:
+        with open(config_path) as f:
+            for line in f:
+                if ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                key = key.strip()
+                value = value.strip()
+                if key == "ttfb_slo":
+                    slo["ttfb_slo_ms"] = float(value) * 1000.0
+                elif key == "tpob_slo":
+                    slo["tpob_slo_ms"] = float(value) * 1000.0
+    except FileNotFoundError:
+        pass
+    except ValueError as e:
+        print(f"[warn] failed to parse DLM SLO config {config_path}: {e}")
+    return slo
+
+
+def _unique_request_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop duplicate request latency records emitted by multiple TP ranks."""
+    unique = []
+    seen = set()
+    for record in records:
+        rid = record.get("rid")
+        key = rid if rid is not None else id(record)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(record)
+    return unique
+
+
 def _percentile(values: List[float], q: float) -> Optional[float]:
     if not values:
         return None
@@ -1440,6 +1477,108 @@ def plot_tpob_per_request(
     plt.close(fig)
 
 
+def plot_request_slo_scatter(
+    latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]],
+    slo_data: Dict[str, Dict[str, Optional[float]]],
+    model_name: str,
+    output_dir: str,
+):
+    """Scatter requests by normalized TTFB/TPOB against their SLOs."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    tasks = []
+    for task, data in latency_data.items():
+        slo = slo_data.get(task, {})
+        if slo.get("ttfb_slo_ms") is None or slo.get("tpob_slo_ms") is None:
+            continue
+        if any(
+            r.get("ttfb_ms") is not None and r.get("tpob_ms") is not None
+            for r in data.get("request", [])
+        ):
+            tasks.append(task)
+    if not tasks:
+        print("[plot] no request records with both TTFB/TPOB SLOs — skipping")
+        return
+
+    colors = {"gsm8k": "#4C72B0", "humaneval": "#DD8452", "math": "#55A868"}
+    model_tag = model_name.replace("/", "_")
+
+    fig, axes = plt.subplots(1, len(tasks), figsize=(5.8 * len(tasks), 5), sharex=False, sharey=False)
+    if len(tasks) == 1:
+        axes = [axes]
+
+    for ax, task in zip(axes, tasks):
+        records = _unique_request_records(latency_data[task].get("request", []))
+        ttfb_slo_ms = float(slo_data[task]["ttfb_slo_ms"])
+        tpob_slo_ms = float(slo_data[task]["tpob_slo_ms"])
+
+        points = [
+            (float(r["ttfb_ms"]) / ttfb_slo_ms, float(r["tpob_ms"]) / tpob_slo_ms)
+            for r in records
+            if r.get("ttfb_ms") is not None and r.get("tpob_ms") is not None
+        ]
+        if not points:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                    transform=ax.transAxes)
+            continue
+
+        arr = np.array(points)
+        x = arr[:, 0]
+        y = arr[:, 1]
+        both_ok = (x <= 1.0) & (y <= 1.0)
+        ttfb_only_bad = (x > 1.0) & (y <= 1.0)
+        tpob_only_bad = (x <= 1.0) & (y > 1.0)
+        both_bad = (x > 1.0) & (y > 1.0)
+
+        color = colors.get(task, "#777")
+        ax.scatter(x[both_ok], y[both_ok], s=14, alpha=0.55, color=color, label="both ok")
+        ax.scatter(x[ttfb_only_bad], y[ttfb_only_bad], s=18, alpha=0.75,
+                   color="#C44E52", marker=">", label="TTFB miss")
+        ax.scatter(x[tpob_only_bad], y[tpob_only_bad], s=18, alpha=0.75,
+                   color="#8172B2", marker="^", label="TPOB miss")
+        ax.scatter(x[both_bad], y[both_bad], s=22, alpha=0.8,
+                   color="#222222", marker="x", label="both miss")
+
+        ax.axvline(1.0, color="black", linestyle="--", linewidth=1.0)
+        ax.axhline(1.0, color="black", linestyle="--", linewidth=1.0)
+        ax.set_title(f"{task.upper()} — request SLO map",
+                     fontsize=12, fontweight="bold")
+        ax.set_xlabel("TTFB / TTFB SLO", fontsize=10)
+        ax.set_ylabel("Mean TPOB / TPOB SLO", fontsize=10)
+        ax.grid(True, linestyle="--", alpha=0.35)
+        ax.legend(fontsize=7, loc="upper right")
+
+        max_x = max(1.05, float(np.percentile(x, 99)) * 1.08)
+        max_y = max(1.05, float(np.percentile(y, 99)) * 1.08)
+        ax.set_xlim(0, max_x)
+        ax.set_ylim(0, max_y)
+
+        total = len(x)
+        ok_count = int(np.sum(both_ok))
+        ax.text(
+            0.03, 0.97,
+            f"n={total}\n"
+            f"SLO ok={ok_count / total * 100:.1f}%\n"
+            f"TTFB SLO={ttfb_slo_ms:.1f} ms\n"
+            f"TPOB SLO={tpob_slo_ms:.1f} ms\n"
+            f"p95 x={np.percentile(x, 95):.2f}\n"
+            f"p95 y={np.percentile(y, 95):.2f}",
+            transform=ax.transAxes,
+            fontsize=8,
+            va="top",
+            ha="left",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.75),
+        )
+
+    fig.suptitle(f"Request distribution against TTFB/TPOB SLO — {model_name}", fontsize=13)
+    fig.tight_layout()
+    out_path = Path(output_dir) / f"request_slo_scatter_{model_tag}.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"[plot] saved → {out_path}")
+    plt.close(fig)
+
+
 def plot_avg_block_steps_per_request(
     latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]],
     model_name: str,
@@ -1936,6 +2075,7 @@ def main():
         all_results: Dict[str, Dict] = {}
         step_data: Dict[str, Dict[str, List[int]]] = {}
         latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        slo_data: Dict[str, Dict[str, Optional[float]]] = {}
         effective_block_size = args.block_size or 32
 
         for task in args.tasks:
@@ -1990,6 +2130,7 @@ def main():
                 read_latency_logs() if args.log else {"request": [], "batch": []}
             )
             latency_data[task] = latency_records
+            slo_data[task] = _read_dllm_slo_config()
             if args.log and step_metrics["records"]:
                 task_step_file = Path(args.output_dir) / f"steps_{task}.jsonl"
                 with open(task_step_file, "w") as f:
@@ -2075,6 +2216,7 @@ def main():
         summary_path = Path(args.output_dir) / f"summary_{model.replace('/', '_')}.json"
         with open(summary_path, "w") as f:
             json.dump({"model": model, "results": all_results,
+                       "slo_data": slo_data,
                        "step_data": {t: v for t, v in step_data.items()},
                        "latency_data": {
                            t: {
@@ -2103,6 +2245,12 @@ def main():
             plot_scheduling_delays(latency_data, model_name=model, output_dir=args.output_dir)
             plot_ttfb_per_request(latency_data, model_name=model, output_dir=args.output_dir)
             plot_tpob_per_request(latency_data, model_name=model, output_dir=args.output_dir)
+            plot_request_slo_scatter(
+                latency_data,
+                slo_data=slo_data,
+                model_name=model,
+                output_dir=args.output_dir,
+            )
             plot_avg_block_steps_per_request(latency_data, model_name=model, output_dir=args.output_dir)
             plot_tpob_by_block_index(latency_data, model_name=model, output_dir=args.output_dir)
             # takes too long time to make figure

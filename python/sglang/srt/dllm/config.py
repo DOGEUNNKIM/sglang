@@ -15,6 +15,7 @@ class DllmConfig:
         admission_window: int | None = None,
         ttfb_slo: float | None = None,
         tpob_slo: float | None = None,
+        lst_enabled: bool = True,
         prefill_forward_time_s: float = 0.030,
         decode_forward_time_s: float = 0.030,
         expected_unmask_per_forward: float = 1.0,
@@ -27,6 +28,7 @@ class DllmConfig:
         self.admission_window = admission_window or max_running_requests
         self.ttfb_slo = ttfb_slo
         self.tpob_slo = tpob_slo
+        self.lst_enabled = lst_enabled
         self.prefill_forward_time_s = prefill_forward_time_s
         self.decode_forward_time_s = decode_forward_time_s
         self.expected_unmask_per_forward = max(expected_unmask_per_forward, 1e-6)
@@ -67,7 +69,7 @@ class DllmConfig:
 
     def use_lst(self) -> bool:
         """True if Least Slack Time scheduling is enabled."""
-        return self.ttfb_slo is not None or self.tpob_slo is not None
+        return self.lst_enabled and (self.ttfb_slo is not None or self.tpob_slo is not None)
 
     @staticmethod
     def from_server_args(
@@ -126,6 +128,7 @@ class DllmConfig:
         tpob_slo_raw = algorithm_config.get("tpob_slo", None)
         ttfb_slo = float(ttfb_slo_raw) if ttfb_slo_raw is not None else None
         tpob_slo = float(tpob_slo_raw) if tpob_slo_raw is not None else None
+        lst_enabled = bool(algorithm_config.get("lst_enabled", True))
 
         # forward_time_s is a shared fallback; prefill/decode can be set separately.
         forward_time_s = float(algorithm_config.get("forward_time_s", 0.030))
@@ -148,6 +151,7 @@ class DllmConfig:
             admission_window=admission_window,
             ttfb_slo=ttfb_slo,
             tpob_slo=tpob_slo,
+            lst_enabled=lst_enabled,
             prefill_forward_time_s=prefill_forward_time_s,
             decode_forward_time_s=decode_forward_time_s,
             expected_unmask_per_forward=expected_unmask_per_forward,

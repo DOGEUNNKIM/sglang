@@ -15,7 +15,8 @@ BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 THRESHOLD="${THRESHOLD:-0.95}"
 NUM_THREADS="${NUM_THREADS:-200}"   ######################## DLLM max concurrent request
 DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-200}" ###### DLLM_WAITING_QUEUE
-SLO_MULTIPLIER="${SLO_MULTIPLIER:-}"         # e.g. 5.0  → deadline = multiplier × ideal; empty = LST disabled
+SCHEDULER="${SCHEDULER:-LST}"               # LST | PREFILL | DECODE
+SLO_MULTIPLIER="${SLO_MULTIPLIER:-}"         # e.g. 5.0  → deadline = multiplier × ideal; used only when SCHEDULER=LST
 FORWARD_TIME_S="${FORWARD_TIME_S:-0.030}"          # shared fallback (s)
 PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"  # override prefill fwd time (s)
 DECODE_FORWARD_TIME_S="${DECODE_FORWARD_TIME_S:-}"    # override decode fwd time (s)
@@ -24,6 +25,7 @@ CONFIG_PATH="${CONFIG_PATH:-/tmp/dlm_algo_config.yaml}"
 STEP_LOG_FILE="${STEP_LOG_FILE:-/tmp/dlm_step_stats.jsonl}"
 REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-/tmp/dlm_request_latency.jsonl}"
 BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-/tmp/dlm_batch_latency.jsonl}"
+TP_SIZE="${TP_SIZE:-1}"
 
 SERVER_PID=""
 
@@ -80,15 +82,16 @@ print(f'{ttfb_ms*m/1000:.4f} {ideal_tpob_s*m:.4f} {unmask_per_fwd:.4f}')
 "
 }
 
-# write_dllm_config TTFB_SLO_S TPOB_SLO_S UNMASK_PER_FWD
+# write_dllm_config TTFB_SLO_S TPOB_SLO_S UNMASK_PER_FWD [LST_ENABLED]
 # All args are optional (empty = omit field from YAML).
-# UNMASK_PER_FWD: task-specific value computed by _compute_task_slo;
-#   overridden by EXPECTED_UNMASK_PER_FORWARD env var if set manually.
+# LST_ENABLED: "false" disables LST scheduling while keeping SLO values for
+#   benchmark scatter-plot measurement; omit or "true" = LST active (default).
 write_dllm_config() {
     local _ttfb_slo="${1:-}"
     local _tpob_slo="${2:-}"
     # Manual env var takes priority over the task-specific computed value
     local _unmask_per_fwd="${EXPECTED_UNMASK_PER_FORWARD:-${3:-}}"
+    local _lst_enabled="${4:-}"
 
     cat > "${CONFIG_PATH}" <<EOF
 threshold: ${THRESHOLD}
@@ -98,12 +101,12 @@ step_log_file: ${STEP_LOG_FILE}
 request_latency_log_file: ${REQUEST_LATENCY_LOG_FILE}
 batch_latency_log_file: ${BATCH_LATENCY_LOG_FILE}
 EOF
-    # LST SLO fields — only written when set (empty = disabled)
     [[ -n "${_ttfb_slo}" ]]              && echo "ttfb_slo: ${_ttfb_slo}"                               >> "${CONFIG_PATH}"
     [[ -n "${_tpob_slo}" ]]              && echo "tpob_slo: ${_tpob_slo}"                               >> "${CONFIG_PATH}"
     [[ -n "${_unmask_per_fwd}" ]]        && echo "expected_unmask_per_forward: ${_unmask_per_fwd}"       >> "${CONFIG_PATH}"
     [[ -n "${PREFILL_FORWARD_TIME_S}" ]] && echo "prefill_forward_time_s: ${PREFILL_FORWARD_TIME_S}"     >> "${CONFIG_PATH}"
     [[ -n "${DECODE_FORWARD_TIME_S}" ]]  && echo "decode_forward_time_s: ${DECODE_FORWARD_TIME_S}"       >> "${CONFIG_PATH}"
+    [[ -n "${_lst_enabled}" ]]           && echo "lst_enabled: ${_lst_enabled}"                          >> "${CONFIG_PATH}"
     return 0
 }
 
@@ -162,13 +165,26 @@ for RATE in "${REQUEST_RATES[@]}"; do
         echo "A fresh server will be started for this task."
         echo "============================================================"
 
+        echo "[scheduler] ${SCHEDULER}"
+        if [[ "${SCHEDULER}" == "DECODE" ]]; then
+            DLLM_ADMISSION_WINDOW="${MAX_RUNNING_REQUESTS}"
+            echo "[scheduler] DLLM_ADMISSION_WINDOW overridden to ${DLLM_ADMISSION_WINDOW}"
+        fi
+
+        # Compute SLO reference values for all schedulers (used for scatter plot).
+        # LST also uses them as scheduling deadlines; PREFILL/DECODE do not.
         _slo_vals=$(_compute_task_slo "${TASK}" "${SLO_MULTIPLIER}")
         read -r _task_ttfb_slo _task_tpob_slo _task_unmask_per_fwd \
             <<< "${_slo_vals}"
         if [[ -n "${_slo_vals}" ]]; then
             echo "[slo] task=${TASK}  ttfb_slo=${_task_ttfb_slo}s  tpob_slo=${_task_tpob_slo}s  unmask/fwd=${_task_unmask_per_fwd}  (${SLO_MULTIPLIER}× ideal)"
         fi
-        write_dllm_config "${_task_ttfb_slo:-}" "${_task_tpob_slo:-}" "${_task_unmask_per_fwd:-}"
+
+        # lst_enabled: false tells server to skip LST scheduling even if SLO values are present.
+        _lst_enabled=""
+        [[ "${SCHEDULER}" != "LST" ]] && _lst_enabled="false"
+
+        write_dllm_config "${_task_ttfb_slo:-}" "${_task_tpob_slo:-}" "${_task_unmask_per_fwd:-}" "${_lst_enabled}"
         echo "===== request_rate=${RATE} task=${TASK} =====" >> /tmp/dlm_results/run_dlm_slo_server_log.txt
 
         PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.6 \
@@ -182,7 +198,7 @@ for RATE in "${REQUEST_RATES[@]}"; do
             --max-running-requests "${MAX_RUNNING_REQUESTS}" \
             --cuda-graph-max-bs "${MAX_RUNNING_REQUESTS}" \
             --disable-cuda-graph-padding \
-            --tp-size 2 \
+            --tp-size "${TP_SIZE}" \
             >> /tmp/dlm_results/run_dlm_slo_server_log.txt 2>&1 &
         SERVER_PID=$!
 
@@ -202,7 +218,7 @@ for RATE in "${REQUEST_RATES[@]}"; do
             --warmup "${WARMUP}"
             --num-output-blocks "${NUM_OUTPUT_BLOCKS}"
             --output-dir "${OUT_DIR}"
-            --tp-size 2
+            --tp-size "${TP_SIZE}"
         )
 
         if [[ -n "${NUM_EXAMPLES}" ]]; then
