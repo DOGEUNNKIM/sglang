@@ -122,7 +122,9 @@ class ReqDllmMixin:
             arrival = ts  # Fallback: DLLM admission time
 
         self.dllm_admission_time = arrival
-        if self.dllm_config is not None and self.dllm_config.use_lst():
+        if self.dllm_config is not None and (
+            self.dllm_config.use_lst() or self.dllm_config.use_sola()
+        ):
             cfg = self.dllm_config
             self.dllm_slo_type = "strict" if random.random() < cfg.strict_prob else "release"
             ttfb_slo = (
@@ -141,7 +143,10 @@ class ReqDllmMixin:
         Remaining compute:
           TTFB phase: remaining_prefill_blocks * prefill_forward_time_s
                     + ceil(block_size / expected_unmask_per_forward) * decode_forward_time_s
-          TPOB phase: ceil(block_size / expected_unmask_per_forward) * decode_forward_time_s
+          TPOB phase: max(1, ceil(block_size / expected_unmask_per_forward) - active_block_steps)
+                    * decode_forward_time_s
+            active_block_steps: decode forwards already done on the current block.
+            Zero when in inter-block delay (no active block), full estimate otherwise.
 
         completed uses len(prefix_indices) so that pre-fetched prefix cache hits
         (done by _fetch_waiting_reqs for new QUEUING_PREFILL requests) are
@@ -155,7 +160,7 @@ class ReqDllmMixin:
         decode_forwards = math.ceil(block_size / self.dllm_ema_unmask_per_fwd)
 
         if self.dllm_first_block_time is None:
-            # TTFB phase
+            # TTFB phase: prefill progress already reflected via prefix_indices
             total_prefill = math.ceil(len(self.origin_input_ids) / block_size)
             # Use the larger of the live prefix_indices and the pre-fetched peek
             # so cache hits are reflected even before init_next_round_input runs.
@@ -166,8 +171,9 @@ class ReqDllmMixin:
                 + decode_forwards * cfg.ema_decode_forward_time_s
             )
         else:
-            # TPOB phase
-            remaining_compute = decode_forwards * cfg.ema_decode_forward_time_s
+            # TPOB phase: subtract decode forwards already completed on this block
+            remaining_decode_forwards = max(1, decode_forwards - self.dllm_active_block_steps)
+            remaining_compute = remaining_decode_forwards * cfg.ema_decode_forward_time_s
 
         return self.dllm_current_deadline - now - remaining_compute
 

@@ -81,9 +81,13 @@ class DllmConfig:
         """True if First-Come First-Served scheduling is active."""
         return self.scheduler_mode == "fcfs"
 
+    def use_sola(self) -> bool:
+        """True if SOLA-adapted pressure-based scheduling is active."""
+        return self.scheduler_mode == "sola"
+
     def use_unified_traversal(self) -> bool:
-        """True when the unified (non-prefill-priority) traversal path is used."""
-        return self.use_lst() or self.use_fcfs()
+        """True when the non-prefill-priority traversal path is used (LST, FCFS, or SOLA)."""
+        return self.use_lst() or self.use_fcfs() or self.use_sola()
 
     @staticmethod
     def from_server_args(

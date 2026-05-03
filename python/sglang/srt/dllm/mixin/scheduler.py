@@ -699,16 +699,174 @@ class SchedulerDllmMixin:
             dllm_config=self.dllm_config,
         )
 
+    def _compute_sola_pressure(self: Scheduler) -> tuple:
+        """Return (p_ttfb, p_tpob): max normalized elapsed/SLO across waiting requests.
+
+        P_TTFB: max over QUEUING requests (first_block=None) of elapsed/ttfb_slo.
+                STAGING requests are excluded — they are already committed (KV
+                allocated) and will be processed regardless of the batch-type decision.
+        P_TPOB: max over inter-block-delay requests (first_block set, no active block)
+                of elapsed_since_last_block/tpob_slo.
+                Mid-block STAGING_DECODE (has_active_block=True) is excluded because
+                it is already in progress and the scheduling decision cannot help it.
+        Both values are in [0, 1]; 1.0 means the SLO deadline has been reached.
+        """
+        now = time.perf_counter()
+        p_ttfb = 0.0
+        p_tpob = 0.0
+        cfg = self.dllm_config
+
+        for req in self.dllm_manager.waiting_queue:
+            if req.dllm_admission_time is None:
+                continue
+            slo_type = req.dllm_slo_type or "strict"
+
+            if req.dllm_first_block_time is None:
+                # TTFB pressure: only QUEUING requests contribute — STAGING requests
+                # (STAGING_PREFILL, STAGING_DECODE first block) are already committed
+                # (KV allocated) and will be processed regardless of the scheduling
+                # decision, so they should not drive the admit-first signal.
+                if req.dllm_phase not in (
+                    DllmReqPhase.QUEUING_PREFILL,
+                    DllmReqPhase.QUEUING_DECODE,
+                ):
+                    continue
+                ttfb_slo = (
+                    cfg.strict_ttfb_slo if slo_type == "strict" else cfg.release_ttfb_slo
+                )
+                if ttfb_slo and ttfb_slo > 0:
+                    elapsed = now - req.dllm_admission_time
+                    p_ttfb = max(p_ttfb, min(elapsed / ttfb_slo, 1.0))
+            elif (
+                not req.has_dllm_active_block()
+                and req.dllm_last_block_time is not None
+            ):
+                # TPOB pressure: inter-block delay only — first block already emitted
+                # and no active block in progress.  Mid-block STAGING_DECODE
+                # (has_active_block=True) is excluded: it is already being denoised
+                # and the decode_first decision cannot accelerate it.
+                tpob_slo = (
+                    cfg.strict_tpob_slo if slo_type == "strict" else cfg.release_tpob_slo
+                )
+                if tpob_slo and tpob_slo > 0:
+                    elapsed = now - req.dllm_last_block_time
+                    p_tpob = max(p_tpob, min(elapsed / tpob_slo, 1.0))
+
+        return p_ttfb, p_tpob
+
+    def _process_dllm_batches_sola(
+        self: Scheduler, adder: PrefillAdder, decode_first: bool
+    ) -> None:
+        """SOLA-adapted two-group traversal driven by system-level pressure.
+
+        Groups are split by TTFB/TPOB phase, matching SOLA's original semantics:
+          ttfb_group: requests that have NOT yet emitted their first block
+                      (dllm_first_block_time is None) — maps to AR prefill priority.
+          tpob_group: requests that have already emitted ≥1 block
+                      (dllm_first_block_time is not None) — maps to AR decode priority.
+
+        decode_first=True  (P_TPOB > P_TTFB): tpob_group first, then ttfb_group.
+        decode_first=False (P_TTFB >= P_TPOB): ttfb_group first, then tpob_group.
+        Within each group requests are ordered by ascending slack (LST-style).
+        The is_staging check inside the loop handles KV-memory routing per request.
+        """
+        scheduled_rids: Set[str] = {req.rid for req in adder.can_run_list}
+        queuing_capacity_exhausted = False
+
+        now = time.perf_counter()
+        ttfb_group = sorted(
+            (
+                r for r in self.dllm_manager.waiting_queue
+                if r.dllm_first_block_time is None
+                and r.rid not in scheduled_rids
+            ),
+            key=lambda r: r.compute_dllm_slack(now),
+        )
+        tpob_group = sorted(
+            (
+                r for r in self.dllm_manager.waiting_queue
+                if r.dllm_first_block_time is not None
+                and r.rid not in scheduled_rids
+            ),
+            key=lambda r: r.compute_dllm_slack(now),
+        )
+
+        ordered = (tpob_group + ttfb_group) if decode_first else (ttfb_group + tpob_group)
+
+        for req in ordered:
+            is_staging = req.dllm_phase in (
+                DllmReqPhase.STAGING_PREFILL,
+                DllmReqPhase.STAGING_DECODE,
+            )
+
+            if is_staging:
+                req.dllm_scheduled_source_phase = req.dllm_phase
+                self._restore_dllm_active_prefix_indices(req)
+                res = adder.add_dllm_staging_req(req)
+                req.dllm_scheduled_exec_phase = req.dllm_phase
+                if res == AddReqResult.NO_TOKEN:
+                    break  # KV memory exhausted
+                scheduled_rids.add(req.rid)
+            else:
+                if queuing_capacity_exhausted:
+                    continue
+
+                running_bs = len(self.running_batch.reqs)
+                if len(adder.can_run_list) >= self.get_num_allocatable_reqs(running_bs):
+                    self.running_batch.batch_is_full = True
+                    if (
+                        not self.enable_priority_preemption
+                        or not adder.preempt_to_schedule(req, self.server_args)
+                    ):
+                        queuing_capacity_exhausted = True
+                        continue
+
+                req.dllm_scheduled_source_phase = req.dllm_phase
+                req.init_next_round_input(self.tree_cache)
+                req.dllm_scheduled_exec_phase = req.dllm_phase
+                res = adder.add_one_req(
+                    req,
+                    has_chunked_req=True,
+                    truncation_align_size=self.truncation_align_size,
+                )
+                if res != AddReqResult.CONTINUE:
+                    if res == AddReqResult.NO_TOKEN:
+                        self.running_batch.batch_is_full = True
+                        break
+                    queuing_capacity_exhausted = True
+                else:
+                    scheduled_rids.add(req.rid)
+
     def _process_dllm_batches(self: Scheduler, adder: PrefillAdder) -> ForwardMode:
         """Process DLLM batches.
 
         prefill: prefill-priority (original behavior, zero overhead).
         fcfs:    unified traversal in arrival-time order.
         lst:     unified traversal in ascending slack order.
+        sola:    two-group traversal driven by system-level TTFB/TPOB pressure.
         """
         forward_mode = ForwardMode.DLLM_EXTEND
 
-        if not self.dllm_config.use_unified_traversal():
+        if self.dllm_config.use_sola():
+            p_ttfb, p_tpob = self._compute_sola_pressure()
+            decode_first = p_tpob > p_ttfb
+            logger.debug(
+                "SOLA pressure: p_ttfb=%.3f p_tpob=%.3f decode_first=%s",
+                p_ttfb, p_tpob, decode_first,
+            )
+            # Broadcast the binary decision from TP0 so every rank picks the
+            # same traversal order despite minor wall-clock timing differences.
+            if getattr(self, "tp_size", 1) > 1:
+                decode_first = broadcast_pyobj(
+                    [decode_first],
+                    self.tp_group.rank,
+                    self.tp_cpu_group,
+                    src=self.tp_group.ranks[0],
+                )[0]
+            self._process_dllm_batches_sola(adder, decode_first)
+        elif self.dllm_config.use_unified_traversal():
+            self._process_dllm_batches_unified(adder)
+        else:
             # Original prefill-priority path (unchanged)
             prefill_reqs = self.dllm_manager.get_prefill_requests()
             prefill_result = AddReqResult.CONTINUE
@@ -734,8 +892,6 @@ class SchedulerDllmMixin:
                         DllmReqPhase.STAGING_DECODE,
                         DllmReqPhase.QUEUING_DECODE,
                     )
-        else:
-            self._process_dllm_batches_unified(adder)
 
         return forward_mode
 
