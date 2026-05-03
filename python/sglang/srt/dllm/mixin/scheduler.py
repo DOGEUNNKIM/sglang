@@ -578,7 +578,7 @@ class SchedulerDllmMixin:
 
         if num_requests_to_add > 0:
             requests_to_add = self.waiting_queue[:num_requests_to_add]
-            if self.dllm_config.use_lst():
+            if self.dllm_config.use_unified_traversal():
                 now = time.perf_counter()
                 for req in requests_to_add:
                     req.set_dllm_admission_time(now)
@@ -607,18 +607,22 @@ class SchedulerDllmMixin:
                             req.dllm_prefetched_prefix_len = len(match_result.device_indices)
 
     def _sort_dllm_by_laxity(self: Scheduler) -> None:
-        """Sort waiting_queue by LST slack (ascending = most urgent first).
+        """Sort waiting_queue for unified-traversal modes.
 
-        Called after init_next_round + _fetch_waiting_reqs so all requests
-        (returning and newly admitted) are present.  Only active when ttfb_slo
-        or tpob_slo is set in config; no-op otherwise.
+        LST:  ascending slack (most urgent first).
+        FCFS: ascending admission time (first arrived first served).
+        Prefill-priority: no-op (order is irrelevant for that path).
         """
-        if not self.dllm_config.use_lst():
-            return
-        now = time.perf_counter()
-        self.dllm_manager.waiting_queue.sort(
-            key=lambda req: req.compute_dllm_slack(now)
-        )
+        cfg = self.dllm_config
+        if cfg.use_lst():
+            now = time.perf_counter()
+            self.dllm_manager.waiting_queue.sort(
+                key=lambda req: req.compute_dllm_slack(now)
+            )
+        elif cfg.use_fcfs():
+            self.dllm_manager.waiting_queue.sort(
+                key=lambda req: req.dllm_admission_time or 0.0
+            )
 
     def _sync_dllm_lst_order_across_tp(self: Scheduler) -> None:
         """Use TP0's LST order on all TP ranks.
@@ -630,7 +634,7 @@ class SchedulerDllmMixin:
         objects/resource checks unchanged.
         """
         if (
-            not self.dllm_config.use_lst()
+            not self.dllm_config.use_unified_traversal()
             or getattr(self, "tp_size", 1) == 1
         ):
             return
@@ -698,14 +702,13 @@ class SchedulerDllmMixin:
     def _process_dllm_batches(self: Scheduler, adder: PrefillAdder) -> ForwardMode:
         """Process DLLM batches.
 
-        Without LST: prefill-priority (original behavior, zero overhead).
-        With LST: unified slack-order traversal — all requests compete by slack
-        regardless of prefill/decode phase, so the most urgent job is always
-        selected first.
+        prefill: prefill-priority (original behavior, zero overhead).
+        fcfs:    unified traversal in arrival-time order.
+        lst:     unified traversal in ascending slack order.
         """
         forward_mode = ForwardMode.DLLM_EXTEND
 
-        if not self.dllm_config.use_lst():
+        if not self.dllm_config.use_unified_traversal():
             # Original prefill-priority path (unchanged)
             prefill_reqs = self.dllm_manager.get_prefill_requests()
             prefill_result = AddReqResult.CONTINUE
@@ -732,13 +735,14 @@ class SchedulerDllmMixin:
                         DllmReqPhase.QUEUING_DECODE,
                     )
         else:
-            self._process_dllm_batches_lst(adder)
+            self._process_dllm_batches_unified(adder)
 
         return forward_mode
 
-    def _process_dllm_batches_lst(self: Scheduler, adder: PrefillAdder) -> None:
-        """True LST batch selection: iterate waiting_queue in ascending slack order.
+    def _process_dllm_batches_unified(self: Scheduler, adder: PrefillAdder) -> None:
+        """Unified batch selection: iterate waiting_queue in pre-sorted order.
 
+        Used by both LST (slack order) and FCFS (arrival-time order).
         Staging requests (continuation of an active block) are added whenever KV
         memory allows, independent of request-count capacity, because they must
         finish the block they started.  Queuing requests (newly scheduled blocks)

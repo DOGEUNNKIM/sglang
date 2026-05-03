@@ -84,10 +84,9 @@ print(f'{ttfb_ms*m/1000:.4f} {ideal_tpob_s*m:.4f} {unmask_per_fwd:.4f}')
 "
 }
 
-# write_dllm_config STRICT_TTFB STRICT_TPOB RELEASE_TTFB RELEASE_TPOB UNMASK_PER_FWD [LST_ENABLED]
+# write_dllm_config STRICT_TTFB STRICT_TPOB RELEASE_TTFB RELEASE_TPOB UNMASK_PER_FWD SCHEDULER_MODE
 # All SLO args are in seconds; empty = omit from YAML.
-# LST_ENABLED: "false" keeps SLO values for scatter-plot measurement but disables
-#   LST scheduling; omit or "true" = LST active (default).
+# SCHEDULER_MODE: "lst" | "fcfs" | "prefill" — written as scheduler_mode to YAML.
 write_dllm_config() {
     local _strict_ttfb="${1:-}"
     local _strict_tpob="${2:-}"
@@ -95,13 +94,14 @@ write_dllm_config() {
     local _release_tpob="${4:-}"
     # Manual env var takes priority over the task-specific computed value
     local _unmask_per_fwd="${EXPECTED_UNMASK_PER_FORWARD:-${5:-}}"
-    local _lst_enabled="${6:-}"
+    local _scheduler_mode="${6:-prefill}"
 
     cat > "${CONFIG_PATH}" <<EOF
 threshold: ${THRESHOLD}
 dllm_admission_window: ${DLLM_ADMISSION_WINDOW}
 forward_time_s: ${FORWARD_TIME_S}
 strict_prob: ${STRICT_PROB}
+scheduler_mode: ${_scheduler_mode}
 step_log_file: ${STEP_LOG_FILE}
 request_latency_log_file: ${REQUEST_LATENCY_LOG_FILE}
 batch_latency_log_file: ${BATCH_LATENCY_LOG_FILE}
@@ -113,7 +113,6 @@ EOF
     [[ -n "${_unmask_per_fwd}" ]]        && echo "expected_unmask_per_forward: ${_unmask_per_fwd}"       >> "${CONFIG_PATH}"
     [[ -n "${PREFILL_FORWARD_TIME_S}" ]] && echo "prefill_forward_time_s: ${PREFILL_FORWARD_TIME_S}"     >> "${CONFIG_PATH}"
     [[ -n "${DECODE_FORWARD_TIME_S}" ]]  && echo "decode_forward_time_s: ${DECODE_FORWARD_TIME_S}"       >> "${CONFIG_PATH}"
-    [[ -n "${_lst_enabled}" ]]           && echo "lst_enabled: ${_lst_enabled}"                          >> "${CONFIG_PATH}"
     return 0
 }
 
@@ -187,11 +186,14 @@ for RATE in "${REQUEST_RATES[@]}"; do
             echo "[slo] task=${TASK}  strict=${_strict_ttfb}s/${_strict_tpob}s  release=${_release_ttfb}s/${_release_tpob}s  unmask/fwd=${_task_unmask_per_fwd}  (${STRICT_MULTIPLIER}×/${RELEASE_MULTIPLIER}× ideal)"
         fi
 
-        # lst_enabled: false → SLO values written for scatter-plot only, no scheduling effect.
-        _lst_enabled=""
-        [[ "${SCHEDULER}" != "LST" ]] && _lst_enabled="false"
+        # Map SCHEDULER env var to scheduler_mode YAML value.
+        case "${SCHEDULER}" in
+            LST)    _scheduler_mode="lst"    ;;
+            FCFS)   _scheduler_mode="fcfs"   ;;
+            *)      _scheduler_mode="prefill" ;;  # PREFILL, DECODE, or unrecognised
+        esac
 
-        write_dllm_config "${_strict_ttfb:-}" "${_strict_tpob:-}" "${_release_ttfb:-}" "${_release_tpob:-}" "${_task_unmask_per_fwd:-}" "${_lst_enabled}"
+        write_dllm_config "${_strict_ttfb:-}" "${_strict_tpob:-}" "${_release_ttfb:-}" "${_release_tpob:-}" "${_task_unmask_per_fwd:-}" "${_scheduler_mode}"
         echo "===== request_rate=${RATE} task=${TASK} =====" >> /tmp/dlm_results/run_dlm_slo_server_log.txt
 
         PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.6 \

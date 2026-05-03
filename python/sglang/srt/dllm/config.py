@@ -18,7 +18,7 @@ class DllmConfig:
         release_ttfb_slo: float | None = None,
         release_tpob_slo: float | None = None,
         strict_prob: float = 0.5,
-        lst_enabled: bool = True,
+        scheduler_mode: str = "prefill",
         prefill_forward_time_s: float = 0.030,
         decode_forward_time_s: float = 0.030,
         expected_unmask_per_forward: float = 1.0,
@@ -34,7 +34,7 @@ class DllmConfig:
         self.release_ttfb_slo = release_ttfb_slo
         self.release_tpob_slo = release_tpob_slo
         self.strict_prob = max(0.0, min(1.0, strict_prob))
-        self.lst_enabled = lst_enabled
+        self.scheduler_mode = scheduler_mode  # "prefill" | "fcfs" | "lst"
         self.prefill_forward_time_s = prefill_forward_time_s
         self.decode_forward_time_s = decode_forward_time_s
         self.expected_unmask_per_forward = max(expected_unmask_per_forward, 1e-6)
@@ -74,8 +74,16 @@ class DllmConfig:
                 )
 
     def use_lst(self) -> bool:
-        """True if Least Slack Time scheduling is enabled."""
-        return self.lst_enabled and self.strict_ttfb_slo is not None
+        """True if Least Slack Time scheduling is active."""
+        return self.scheduler_mode == "lst" and self.strict_ttfb_slo is not None
+
+    def use_fcfs(self) -> bool:
+        """True if First-Come First-Served scheduling is active."""
+        return self.scheduler_mode == "fcfs"
+
+    def use_unified_traversal(self) -> bool:
+        """True when the unified (non-prefill-priority) traversal path is used."""
+        return self.use_lst() or self.use_fcfs()
 
     @staticmethod
     def from_server_args(
@@ -139,7 +147,13 @@ class DllmConfig:
         release_ttfb_slo = _parse_slo("release_ttfb_slo")
         release_tpob_slo = _parse_slo("release_tpob_slo")
         strict_prob = float(algorithm_config.get("strict_prob", 0.5))
-        lst_enabled = bool(algorithm_config.get("lst_enabled", True))
+        # scheduler_mode takes precedence; fall back to legacy lst_enabled field.
+        raw_mode = algorithm_config.get("scheduler_mode", None)
+        if raw_mode is not None:
+            scheduler_mode = str(raw_mode)
+        else:
+            lst_enabled = bool(algorithm_config.get("lst_enabled", True))
+            scheduler_mode = "lst" if lst_enabled else "prefill"
 
         # forward_time_s is a shared fallback; prefill/decode can be set separately.
         forward_time_s = float(algorithm_config.get("forward_time_s", 0.030))
@@ -165,7 +179,7 @@ class DllmConfig:
             release_ttfb_slo=release_ttfb_slo,
             release_tpob_slo=release_tpob_slo,
             strict_prob=strict_prob,
-            lst_enabled=lst_enabled,
+            scheduler_mode=scheduler_mode,
             prefill_forward_time_s=prefill_forward_time_s,
             decode_forward_time_s=decode_forward_time_s,
             expected_unmask_per_forward=expected_unmask_per_forward,
