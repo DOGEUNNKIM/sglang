@@ -714,6 +714,28 @@ def _unique_request_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any
     return unique
 
 
+def _unique_batch_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop duplicate batch latency records emitted by multiple TP ranks."""
+    unique = []
+    seen = set()
+    for idx, record in enumerate(records):
+        seq = record.get("seq")
+        if seq is not None:
+            key = ("seq", int(seq))
+        else:
+            key = (
+                "fallback",
+                idx,
+                record.get("phase"),
+                tuple(record.get("rids") or []),
+            )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(record)
+    return unique
+
+
 def _percentile(values: List[float], q: float) -> Optional[float]:
     if not values:
         return None
@@ -907,6 +929,21 @@ def print_latency_summary(task: str, summary: Dict[str, Any]) -> None:
                 ("phase switches", "phase_switches"),
             ],
         ),
+        (
+            "Scheduler",
+            [
+                ("schedule total mean", "mean_schedule_total_ms"),
+                ("schedule total p95", "p95_schedule_total_ms"),
+                ("schedule/share batch", "mean_schedule_share_of_batch_pct"),
+                ("schedule/share e2e", "schedule_share_of_e2e_pct"),
+                ("fetch waiting mean", "mean_fetch_waiting_ms"),
+                ("sort laxity mean", "mean_sort_laxity_ms"),
+                ("tp sync mean", "mean_tp_sync_order_ms"),
+                ("select batch mean", "mean_select_batch_ms"),
+                ("update state mean", "mean_update_state_ms"),
+                ("batch build mean", "mean_batch_build_ms"),
+            ],
+        ),
     ]
 
     print(f"[{task}] latency stats")
@@ -925,8 +962,12 @@ def print_latency_summary(task: str, summary: Dict[str, Any]) -> None:
 def summarize_latency_metrics(
     request_records: List[Dict[str, Any]],
     batch_records: List[Dict[str, Any]],
+    end_to_end_s: Optional[float] = None,
 ) -> Dict[str, Any]:
     import numpy as np
+
+    request_records = _unique_request_records(request_records)
+    batch_records = _unique_batch_records(batch_records)
 
     ttfb_ms = _values(request_records, "ttfb_ms")
     tpob_ms = _values(request_records, "tpob_ms")
@@ -963,6 +1004,25 @@ def summarize_latency_metrics(
             batch_records, "dllm_staging_queue_size"
         )
     dllm_admission_window = _values(batch_records, "dllm_admission_window")
+    schedule_total_ms = _values(batch_records, "schedule_total_ms")
+    fetch_waiting_ms = _values(batch_records, "fetch_waiting_ms")
+    sort_laxity_ms = _values(batch_records, "sort_laxity_ms")
+    tp_sync_order_ms = _values(batch_records, "tp_sync_order_ms")
+    select_batch_ms = _values(batch_records, "select_batch_ms")
+    update_state_ms = _values(batch_records, "update_state_ms")
+    batch_build_ms = _values(batch_records, "batch_build_ms")
+    duration_ms = _values(batch_records, "duration_ms")
+    schedule_share_of_batch_pct = [
+        float(record["schedule_total_ms"]) / float(record["duration_ms"]) * 100.0
+        for record in batch_records
+        if record.get("schedule_total_ms") is not None
+        and record.get("duration_ms") not in (None, 0, 0.0)
+    ]
+    total_schedule_ms = float(sum(schedule_total_ms)) if schedule_total_ms else 0.0
+    total_batch_ms = float(sum(duration_ms)) if duration_ms else 0.0
+    schedule_share_of_e2e_pct = None
+    if end_to_end_s is not None and end_to_end_s > 0:
+        schedule_share_of_e2e_pct = total_schedule_ms / (end_to_end_s * 1000.0) * 100.0
     phase_sequence = [record.get("phase") for record in batch_records]
     req_phase_counts = _count_per_req_phases(batch_records)
 
@@ -1016,6 +1076,41 @@ def summarize_latency_metrics(
         "avg_initial_prefill_req_ms": avg_initial_prefill_req_ms,
         "avg_staging_prefill_req_ms": avg_staging_prefill_req_ms,
         "avg_actual_decode_block_ms": avg_actual_decode_block_ms,
+        "mean_schedule_total_ms": (
+            float(np.mean(schedule_total_ms)) if schedule_total_ms else None
+        ),
+        "p50_schedule_total_ms": _percentile(schedule_total_ms, 50),
+        "p95_schedule_total_ms": _percentile(schedule_total_ms, 95),
+        "p99_schedule_total_ms": _percentile(schedule_total_ms, 99),
+        "mean_fetch_waiting_ms": (
+            float(np.mean(fetch_waiting_ms)) if fetch_waiting_ms else None
+        ),
+        "mean_sort_laxity_ms": (
+            float(np.mean(sort_laxity_ms)) if sort_laxity_ms else None
+        ),
+        "mean_tp_sync_order_ms": (
+            float(np.mean(tp_sync_order_ms)) if tp_sync_order_ms else None
+        ),
+        "mean_select_batch_ms": (
+            float(np.mean(select_batch_ms)) if select_batch_ms else None
+        ),
+        "mean_update_state_ms": (
+            float(np.mean(update_state_ms)) if update_state_ms else None
+        ),
+        "mean_batch_build_ms": (
+            float(np.mean(batch_build_ms)) if batch_build_ms else None
+        ),
+        "total_schedule_ms": total_schedule_ms if schedule_total_ms else None,
+        "total_batch_ms": total_batch_ms if duration_ms else None,
+        "mean_schedule_share_of_batch_pct": (
+            float(np.mean(schedule_share_of_batch_pct))
+            if schedule_share_of_batch_pct
+            else None
+        ),
+        "p95_schedule_share_of_batch_pct": _percentile(
+            schedule_share_of_batch_pct, 95
+        ),
+        "schedule_share_of_e2e_pct": schedule_share_of_e2e_pct,
         "dllm_admission_window": (
             int(max(dllm_admission_window)) if dllm_admission_window else None
         ),
@@ -2415,6 +2510,7 @@ def main():
             latency_summary = summarize_latency_metrics(
                 latency_records["request"],
                 latency_records["batch"],
+                end_to_end_s=metrics.get("latency_s"),
             )
             metrics["latency_stats"] = latency_summary
 

@@ -51,6 +51,15 @@ class SchedulerDllmMixin:
 
     def get_new_batch_dllm(self: Scheduler) -> Optional[ScheduleBatch]:
         """Generate a new batch for DLLM (Diffusion LLM) scheduling."""
+        schedule_start_time = time.perf_counter()
+        schedule_timing = {
+            "fetch_waiting_s": 0.0,
+            "sort_laxity_s": 0.0,
+            "tp_sync_order_s": 0.0,
+            "select_batch_s": 0.0,
+            "update_state_s": 0.0,
+            "batch_build_s": 0.0,
+        }
         if self.enable_priority_preemption:
             self.running_batch.batch_is_full = False
 
@@ -66,12 +75,22 @@ class SchedulerDllmMixin:
 
         # Initialize DLLM manager and transfer requests
         self.dllm_manager.init_next_round()
+        phase_start_time = time.perf_counter()
         self._fetch_waiting_reqs()
+        schedule_timing["fetch_waiting_s"] = (
+            time.perf_counter() - phase_start_time
+        )
+        phase_start_time = time.perf_counter()
         self._sort_dllm_by_laxity()
+        schedule_timing["sort_laxity_s"] = time.perf_counter() - phase_start_time
+        phase_start_time = time.perf_counter()
         self._sync_dllm_lst_order_across_tp()
+        schedule_timing["tp_sync_order_s"] = time.perf_counter() - phase_start_time
 
         # Process batches
+        phase_start_time = time.perf_counter()
         forward_mode = self._process_dllm_batches(adder)
+        schedule_timing["select_batch_s"] = time.perf_counter() - phase_start_time
 
         can_run_list = adder.can_run_list
         if not can_run_list:
@@ -79,16 +98,20 @@ class SchedulerDllmMixin:
 
         # Record metrics and update state
         set_time_batch(can_run_list, "set_forward_entry_time")
+        phase_start_time = time.perf_counter()
         self._update_state_for_batch(can_run_list, adder, running_bs)
+        schedule_timing["update_state_s"] = time.perf_counter() - phase_start_time
 
         # Create and prepare batch
-        schedule_start_time = time.perf_counter()
         batch_phase = self._get_dllm_batch_phase(can_run_list)
+        phase_start_time = time.perf_counter()
         new_batch = self._create_dllm_batch(can_run_list, forward_mode)
+        schedule_timing["batch_build_s"] = time.perf_counter() - phase_start_time
         self._annotate_dllm_batch_metrics(
             new_batch,
             batch_phase=batch_phase,
             schedule_start_time=schedule_start_time,
+            schedule_timing=schedule_timing,
         )
         return new_batch
 
@@ -284,6 +307,7 @@ class SchedulerDllmMixin:
         batch: ScheduleBatch,
         batch_phase: str,
         schedule_start_time: float,
+        schedule_timing: dict[str, float],
     ) -> None:
         if self.dllm_last_batch_phase == batch_phase:
             self.dllm_phase_run_length += 1
@@ -305,6 +329,10 @@ class SchedulerDllmMixin:
         batch.dllm_phase_run_length = self.dllm_phase_run_length
         batch.dllm_phase_switch_count = self.dllm_phase_switch_count
         batch.dllm_schedule_start_time = schedule_start_time
+        batch.dllm_schedule_timing = dict(schedule_timing)
+        batch.dllm_schedule_total_s = max(
+            0.0, sum(float(value) for value in schedule_timing.values())
+        )
         batch.dllm_forward_start_time = time.perf_counter()
         self._annotate_dllm_per_req_metrics(batch)
         self.dllm_batch_seq += 1
@@ -405,9 +433,19 @@ class SchedulerDllmMixin:
         end_time = time.perf_counter()
         start_time = getattr(batch, "dllm_forward_start_time", end_time)
         schedule_start_time = getattr(batch, "dllm_schedule_start_time", start_time)
+        schedule_timing = dict(getattr(batch, "dllm_schedule_timing", {}) or {})
         forward_result_s = end_time - start_time
         duration_s = end_time - schedule_start_time
         schedule_prepare_s = start_time - schedule_start_time
+        schedule_total_s = float(
+            getattr(batch, "dllm_schedule_total_s", schedule_prepare_s)
+        )
+        fetch_waiting_s = float(schedule_timing.get("fetch_waiting_s", 0.0))
+        sort_laxity_s = float(schedule_timing.get("sort_laxity_s", 0.0))
+        tp_sync_order_s = float(schedule_timing.get("tp_sync_order_s", 0.0))
+        select_batch_s = float(schedule_timing.get("select_batch_s", 0.0))
+        update_state_s = float(schedule_timing.get("update_state_s", 0.0))
+        batch_build_s = float(schedule_timing.get("batch_build_s", schedule_prepare_s))
         phase = getattr(batch, "dllm_batch_phase", "unknown")
         num_reqs = batch.batch_size()
         num_output_blocks = 0
@@ -540,8 +578,22 @@ class SchedulerDllmMixin:
             "duration_ms": duration_s * 1000,
             "forward_result_s": forward_result_s,
             "forward_result_ms": forward_result_s * 1000,
+            "schedule_total_s": schedule_total_s,
+            "schedule_total_ms": schedule_total_s * 1000,
             "schedule_prepare_s": schedule_prepare_s,
             "schedule_prepare_ms": schedule_prepare_s * 1000,
+            "fetch_waiting_s": fetch_waiting_s,
+            "fetch_waiting_ms": fetch_waiting_s * 1000,
+            "sort_laxity_s": sort_laxity_s,
+            "sort_laxity_ms": sort_laxity_s * 1000,
+            "tp_sync_order_s": tp_sync_order_s,
+            "tp_sync_order_ms": tp_sync_order_s * 1000,
+            "select_batch_s": select_batch_s,
+            "select_batch_ms": select_batch_s * 1000,
+            "update_state_s": update_state_s,
+            "update_state_ms": update_state_s * 1000,
+            "batch_build_s": batch_build_s,
+            "batch_build_ms": batch_build_s * 1000,
             "prefill_batch_count": self.dllm_prefill_batch_count,
             "decode_batch_count": self.dllm_decode_batch_count,
             "mixed_prefill_decode_batch_count": (
