@@ -8,13 +8,13 @@ WARMUP="${WARMUP:-16}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 REQUEST_RATES=(${REQUEST_RATES:-8}) #0.5 1 1.5
 TASKS=(${TASKS:-gsm8k}) ##### TASK humaneval math gsm8k
-NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
+NUM_EXAMPLES="${NUM_EXAMPLES:-1000}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
 PORT="${PORT:-30000}"
+#DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-100}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 THRESHOLD="${THRESHOLD:-0.95}"
-NUM_THREADS="${NUM_THREADS:-100}"   ######################## DLLM max concurrent request
-DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-100}" ###### DLLM_WAITING_QUEUE
+NUM_THREADS_SWEEP=(${NUM_THREADS_SWEEP:-200})  # sweep values 50 100 150 200 250
 SCHEDULER="${SCHEDULER:-LST}"               # LST | PREFILL | DECODE | FCFS | SOLA
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-5.0}"    # strict SLO = multiplier × ideal latency
 RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-25.0}" # release SLO = multiplier × ideal latency
@@ -160,14 +160,16 @@ stop_server() {
 trap stop_server EXIT
 
 for RATE in "${REQUEST_RATES[@]}"; do
-    OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}"
+    for THREADS in "${NUM_THREADS_SWEEP[@]}"; do
+        DLLM_ADMISSION_WINDOW="${THREADS}"
+        OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}/threads_${THREADS}"
 
-    mkdir -p "${OUT_DIR}"
+        mkdir -p "${OUT_DIR}"
 
     for TASK in "${TASKS[@]}"; do
         echo
         echo "============================================================"
-        echo "DLM benchmark: request_rate=${RATE}, task=${TASK}, output_dir=${OUT_DIR}"
+        echo "DLM benchmark: rate=${RATE}, threads=${THREADS}, task=${TASK}, output_dir=${OUT_DIR}"
         echo "A fresh server will be started for this task."
         echo "============================================================"
 
@@ -224,7 +226,7 @@ for RATE in "${REQUEST_RATES[@]}"; do
             --block-size "${BLOCK_SIZE}"
             --log
             --request-rate "${RATE}"
-            --num-threads "${NUM_THREADS}"
+            --num-threads "${THREADS}"
             --warmup "${WARMUP}"
             --num-output-blocks "${NUM_OUTPUT_BLOCKS}"
             --output-dir "${OUT_DIR}"
@@ -240,7 +242,8 @@ for RATE in "${REQUEST_RATES[@]}"; do
 
         stop_server
     done
-done
+    done  # THREADS
+done  # RATE
 
 echo
 echo "============================================================"
@@ -248,18 +251,20 @@ echo "DLM SLO rates"
 echo "============================================================"
 
 for RATE in "${REQUEST_RATES[@]}"; do
-    OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}"
-    SLO_PATH="${OUT_DIR}/slo_rates.json"
+    for THREADS in "${NUM_THREADS_SWEEP[@]}"; do
+        OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}/threads_${THREADS}"
+        SLO_PATH="${OUT_DIR}/slo_rates.json"
 
-    echo
-    echo "DLM SLO rate: request_rate=${RATE}"
-    echo "------------------------------------------------------------"
+        echo
+        echo "DLM SLO rate: request_rate=${RATE}, threads=${THREADS}"
+        echo "------------------------------------------------------------"
 
-    python test/dlm_slorate.py \
-        --latency-dir "${OUT_DIR}" \
-        --tasks "${TASKS[@]}" \
-        --output-json "${SLO_PATH}"
+        python test/dlm_slorate.py \
+            --latency-dir "${OUT_DIR}" \
+            --tasks "${TASKS[@]}" \
+            --output-json "${SLO_PATH}"
+    done
 done
 
 echo
-echo "Done. Results are under ${OUTPUT_ROOT}/request_rate_{${REQUEST_RATES[*]}}"
+echo "Done. Results are under ${OUTPUT_ROOT}/request_rate_*/threads_*/"
