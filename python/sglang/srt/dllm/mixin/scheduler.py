@@ -186,16 +186,15 @@ class SchedulerDllmMixin:
                 if final_steps > 0:
                     req.dllm_total_block_steps += final_steps
                     req.dllm_block_steps_list.append(final_steps)
-                    observed_rate = self.dllm_config.block_size / final_steps
-                    alpha = self.dllm_config.ema_alpha
-                    # Per-request EMA: captures per-request unmask rate variation.
-                    req.dllm_ema_unmask_per_fwd = (
-                        (1.0 - alpha) * req.dllm_ema_unmask_per_fwd
-                        + alpha * observed_rate
+                    # Bellman TD update at block completion (no GPU sync needed).
+                    # Multi-step target: starting from block_size masks, observed final_steps.
+                    cfg = self.dllm_config
+                    r = cfg.block_size
+                    alpha = cfg.bellman_alpha
+                    cfg.decode_forwards_by_remaining[r] = (
+                        (1.0 - alpha) * cfg.decode_forwards_by_remaining[r]
+                        + alpha * float(final_steps)
                     )
-                    # Global EMA: warm-start for future requests.
-                    if self.dllm_config.use_lst():
-                        self.dllm_config.update_ema_unmask(observed_rate)
 
                 req.clear_dllm_active_block()
                 has_output = True
@@ -211,19 +210,10 @@ class SchedulerDllmMixin:
 
             if has_output or has_finished:
                 self.stream_output(batch.reqs, batch.return_logprob)
+                # Block completion changes deadlines/phase → re-sort next schedule.
+                if has_output:
+                    self.dllm_manager.queue_dirty = True
             self.token_to_kv_pool_allocator.free_group_end()
-
-        # EMA: update forward time for pure prefill or decode batches.
-        # Mixed batches are skipped — forward time cannot be cleanly attributed.
-        if self.dllm_config.use_lst():
-            forward_time_s = block_emit_time - getattr(
-                batch, "dllm_forward_start_time", block_emit_time
-            )
-            if forward_time_s > 0:
-                self.dllm_config.update_ema_forward_time(
-                    forward_time_s,
-                    getattr(batch, "dllm_batch_phase", None),
-                )
 
         can_run_cuda_graph = getattr(result, "can_run_cuda_graph", False)
         self._maybe_log_dllm_batch_metrics(batch, result)
@@ -395,10 +385,12 @@ class SchedulerDllmMixin:
                         req.dllm_prefill_end_time = None
                     req.dllm_active_prefix_ids = list(req.fill_ids[:prefix_len])
                     req.dllm_active_ids = list(chunk)
-                    req.dllm_active_start = self.dllm_config.block_size - chunk.count(
-                        mask_id
-                    )
+                    _remaining = chunk.count(mask_id)
+                    req.dllm_active_start = self.dllm_config.block_size - _remaining
                     req.dllm_active_block_steps = 0
+                    req.dllm_active_remaining_masks = _remaining
+                else:
+                    req.dllm_active_remaining_masks = chunk.count(mask_id)
                 if req.dllm_active_cache_locs is None and batch.out_cache_loc is not None:
                     req.dllm_active_cache_locs = batch.out_cache_loc[
                         offset : offset + extend_len
@@ -664,7 +656,12 @@ class SchedulerDllmMixin:
         LST:  ascending slack (most urgent first).
         FCFS: ascending admission time (first arrived first served).
         Prefill-priority: no-op (order is irrelevant for that path).
+
+        Skipped when queue_dirty is False — the ordering hasn't changed since
+        the last sort (no new requests, no block completions).
         """
+        if not self.dllm_manager.queue_dirty:
+            return
         cfg = self.dllm_config
         if cfg.use_lst():
             now = time.perf_counter()
@@ -675,6 +672,7 @@ class SchedulerDllmMixin:
             self.dllm_manager.waiting_queue.sort(
                 key=lambda req: req.dllm_admission_time or 0.0
             )
+        self.dllm_manager.queue_dirty = False
 
     def _sync_dllm_lst_order_across_tp(self: Scheduler) -> None:
         """Use TP0's LST order on all TP ranks.
@@ -825,23 +823,17 @@ class SchedulerDllmMixin:
         scheduled_rids: Set[str] = {req.rid for req in adder.can_run_list}
         queuing_capacity_exhausted = False
 
-        now = time.perf_counter()
-        ttfb_group = sorted(
-            (
-                r for r in self.dllm_manager.waiting_queue
-                if r.dllm_first_block_time is None
-                and r.rid not in scheduled_rids
-            ),
-            key=lambda r: r.compute_dllm_slack(now),
-        )
-        tpob_group = sorted(
-            (
-                r for r in self.dllm_manager.waiting_queue
-                if r.dllm_first_block_time is not None
-                and r.rid not in scheduled_rids
-            ),
-            key=lambda r: r.compute_dllm_slack(now),
-        )
+        # Reuse the slack-sorted waiting_queue from _sort_dllm_by_laxity().
+        # O(n) partition preserves the sorted order — no additional sort needed.
+        ttfb_group: List[Req] = []
+        tpob_group: List[Req] = []
+        for r in self.dllm_manager.waiting_queue:
+            if r.rid in scheduled_rids:
+                continue
+            if r.dllm_first_block_time is None:
+                ttfb_group.append(r)
+            else:
+                tpob_group.append(r)
 
         ordered = (tpob_group + ttfb_group) if decode_first else (ttfb_group + tpob_group)
 
@@ -1184,6 +1176,10 @@ class DllmManager:
         )
         self.waiting_queue: List[Req] = []
         self.pending_next_round_reqs: List[Req] = []
+        # Dirty flag: True when waiting_queue membership or request state has
+        # changed since the last sort.  Avoids redundant O(n log n) sorts on
+        # forward steps where nothing has changed.
+        self.queue_dirty: bool = True
 
     def get_prefill_requests(self) -> List[Req]:
         """Get all prefill requests from waiting queue."""
@@ -1204,6 +1200,7 @@ class DllmManager:
             raise RuntimeError("Redundant requests detected in dLLM requests.")
 
         self.waiting_queue.extend(reqs_to_add)
+        self.queue_dirty = True
 
     def set_pending_next_round_reqs(self, reqs: Union[Req, List[Req]]) -> None:
         """Remember requests that need next-round initialization."""
@@ -1250,4 +1247,5 @@ class DllmManager:
                 waiting_req.rid != req.rid for waiting_req in self.waiting_queue
             ):
                 self.waiting_queue.append(req)
+                self.queue_dirty = True
         self.pending_next_round_reqs = []

@@ -1,3 +1,4 @@
+import math
 from typing import Any
 
 from sglang.srt.configs.model_config import ModelConfig
@@ -39,39 +40,69 @@ class DllmConfig:
         self.decode_forward_time_s = decode_forward_time_s
         self.expected_unmask_per_forward = max(expected_unmask_per_forward, 1e-6)
 
-        # EMA-corrected estimates (initialised to static config values).
-        # Updated at runtime in process_batch_result_dllm; used by compute_dllm_slack.
-        self.ema_alpha: float = float(algorithm_config.get("ema_alpha", 0.1))
-        self.ema_unmask_per_forward: float = self.expected_unmask_per_forward
-        self.ema_decode_forward_time_s: float = decode_forward_time_s
-        self.ema_prefill_forward_time_s: float = prefill_forward_time_s
+        self.bellman_alpha0: float = max(
+            0.0,
+            float(algorithm_config.get("bellman_alpha0", 0.2)),
+        )
+        self.bellman_alpha_min: float = min(
+            1.0,
+            max(0.0, float(algorithm_config.get("bellman_alpha_min", 0.03))),
+        )
+        # Pre-computed fixed alpha — avoids recomputing min/max on every update.
+        self.bellman_alpha: float = min(1.0, max(self.bellman_alpha_min, self.bellman_alpha0))
 
-    def update_ema_unmask(self, observed: float) -> None:
-        """EMA-update the expected unmask tokens per decode forward pass."""
-        self.ema_unmask_per_forward = (
-            (1.0 - self.ema_alpha) * self.ema_unmask_per_forward
-            + self.ema_alpha * max(observed, 1e-6)
+        # Global Bellman/TD table for remaining decode forwards.
+        # V[r] estimates how many unmask forwards are needed to finish a block
+        # when r masked tokens remain.  Starts from conservative prior V[r] = r,
+        # then receives TD updates:
+        #   V[before] <- (1 - alpha) * V[before] + alpha * (1 + V[after])
+        # with alpha = max(alpha_min, alpha0) (fixed).
+        # Initialize V[r] = r / expected_unmask_per_forward so that the prior
+        # matches the EMA-based estimate used before convergence.
+        _init_rate = max(self.expected_unmask_per_forward, 1e-6)
+        self.decode_forwards_by_remaining: list[float] = [
+            float(remaining) / _init_rate
+            for remaining in range(self.block_size + 1)
+        ]
+
+        # Single safety multiplier applied to all decode forward estimates.
+        self.decode_safety_factor: float = float(
+            algorithm_config.get("decode_safety_factor", 1.0)
         )
 
-    def update_ema_forward_time(self, observed_s: float, phase: str) -> None:
-        """EMA-update decode or prefill forward time.
+    def _clamp_remaining_masks(self, remaining_masked_tokens: int | None) -> int:
+        if remaining_masked_tokens is None:
+            return self.block_size
+        return max(0, min(self.block_size, int(remaining_masked_tokens)))
 
-        Mixed batches are skipped — forward time cannot be cleanly attributed.
-        Observations more than 5× the current EMA are treated as outliers
-        (e.g. GC pauses, preemption) and dropped.
+    def update_decode_forwards_estimate(
+        self,
+        remaining_masked_before: int | None,
+        remaining_masked_after: int | None,
+    ) -> None:
+        """TD-update V[remaining] from one observed unmask forward transition."""
+        before = self._clamp_remaining_masks(remaining_masked_before)
+        if before <= 0:
+            return
+        after = self._clamp_remaining_masks(remaining_masked_after)
+        target_forwards = 1.0 + self.decode_forwards_by_remaining[after]
+        current_forwards = self.decode_forwards_by_remaining[before]
+        alpha = self.bellman_alpha
+        self.decode_forwards_by_remaining[before] = (
+            (1.0 - alpha) * current_forwards + alpha * target_forwards
+        )
+
+    def estimate_decode_forwards(self, remaining_masked_tokens: int) -> int:
+        """Estimate forwards needed to finish the active decode block.
+
+        Uses the global Bellman/TD table V[remaining].  Before any observation,
+        V[r] is initialized as r to avoid cold-start under-estimation.
         """
-        if phase == "decode":
-            if observed_s <= 5.0 * self.ema_decode_forward_time_s:
-                self.ema_decode_forward_time_s = (
-                    (1.0 - self.ema_alpha) * self.ema_decode_forward_time_s
-                    + self.ema_alpha * observed_s
-                )
-        elif phase == "prefill":
-            if observed_s <= 5.0 * self.ema_prefill_forward_time_s:
-                self.ema_prefill_forward_time_s = (
-                    (1.0 - self.ema_alpha) * self.ema_prefill_forward_time_s
-                    + self.ema_alpha * observed_s
-                )
+        remaining = self._clamp_remaining_masks(remaining_masked_tokens)
+        if remaining <= 0:
+            return 0
+        estimated_forwards = self.decode_forwards_by_remaining[remaining]
+        return max(1, math.ceil(self.decode_safety_factor * estimated_forwards))
 
     def use_lst(self) -> bool:
         """True if Least Slack Time scheduling is active."""

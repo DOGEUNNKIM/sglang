@@ -42,6 +42,7 @@ class ReqDllmMixin:
         self.dllm_active_start = 0
         self.dllm_active_block_steps = 0
         self.dllm_pending_kv_save = False
+        self.dllm_active_remaining_masks: Optional[int] = None
         # cumulative decode forward steps across all completed blocks
         self.dllm_total_block_steps: int = 0
         # decode delay: time from block completion → next block first enters a batch
@@ -60,13 +61,6 @@ class ReqDllmMixin:
         # so that cache hits are reflected in remaining_prefill even before
         # init_next_round_input sets prefix_indices.
         self.dllm_prefetched_prefix_len: int = 0
-        # Per-request EMA of unmask tokens per decode forward pass.
-        # Warm-started from the global EMA so new requests get a reasonable prior;
-        # updated on each completed block.  Used instead of the global EMA in
-        # compute_dllm_slack so that per-request variation is reflected.
-        self.dllm_ema_unmask_per_fwd: float = (
-            dllm_config.ema_unmask_per_forward if dllm_config is not None else 1.0
-        )
 
         if self.dllm_config is not None:
             if len(self.origin_input_ids) < self.dllm_config.block_size:
@@ -142,11 +136,9 @@ class ReqDllmMixin:
 
         Remaining compute:
           TTFB phase: remaining_prefill_blocks * prefill_forward_time_s
-                    + ceil(block_size / expected_unmask_per_forward) * decode_forward_time_s
-          TPOB phase: max(1, ceil(block_size / expected_unmask_per_forward) - active_block_steps)
-                    * decode_forward_time_s
-            active_block_steps: decode forwards already done on the current block.
-            Zero when in inter-block delay (no active block), full estimate otherwise.
+                    + estimated decode forwards * decode_forward_time_s
+          TPOB phase: estimated decode forwards * decode_forward_time_s
+            Decode forwards are estimated from the global Bellman table V[remaining_masks].
 
         completed uses len(prefix_indices) so that pre-fetched prefix cache hits
         (done by _fetch_waiting_reqs for new QUEUING_PREFILL requests) are
@@ -157,7 +149,10 @@ class ReqDllmMixin:
 
         cfg = self.dllm_config
         block_size = cfg.block_size
-        decode_forwards = math.ceil(block_size / self.dllm_ema_unmask_per_fwd)
+        # Inline Bellman lookup: dllm_active_remaining_masks is always in [0, block_size]
+        # when set, so clamping is unnecessary. Fall back to block_size when no active block.
+        r = self.dllm_active_remaining_masks if self.dllm_active_remaining_masks is not None else block_size
+        decode_forwards = max(1, math.ceil(cfg.decode_safety_factor * cfg.decode_forwards_by_remaining[r]))
 
         if self.dllm_first_block_time is None:
             # TTFB phase: prefill progress already reflected via prefix_indices
@@ -167,13 +162,12 @@ class ReqDllmMixin:
             completed = max(len(self.prefix_indices), self.dllm_prefetched_prefix_len) // block_size
             remaining_prefill = max(0, total_prefill - completed) if self.is_dllm_prefill() else 0
             remaining_compute = (
-                remaining_prefill * cfg.ema_prefill_forward_time_s
-                + decode_forwards * cfg.ema_decode_forward_time_s
+                remaining_prefill * cfg.prefill_forward_time_s
+                + decode_forwards * cfg.decode_forward_time_s
             )
         else:
-            # TPOB phase: subtract decode forwards already completed on this block
-            remaining_decode_forwards = max(1, decode_forwards - self.dllm_active_block_steps)
-            remaining_compute = remaining_decode_forwards * cfg.ema_decode_forward_time_s
+            # TPOB phase: estimate from the current remaining mask count.
+            remaining_compute = decode_forwards * cfg.decode_forward_time_s
 
         return self.dllm_current_deadline - now - remaining_compute
 
@@ -219,6 +213,7 @@ class ReqDllmMixin:
         self.dllm_active_start = 0
         self.dllm_active_block_steps = 0
         self.dllm_pending_kv_save = False
+        self.dllm_active_remaining_masks = None
 
     def determine_dllm_phase(self: Req):
         if self.has_dllm_active_block():
