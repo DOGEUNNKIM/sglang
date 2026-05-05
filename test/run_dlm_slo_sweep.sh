@@ -13,8 +13,8 @@ MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
 PORT="${PORT:-30000}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 THRESHOLD="${THRESHOLD:-0.95}"
-NUM_THREADS="${NUM_THREADS:-200}"   ######################## DLLM max concurrent request
-DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-200}" ###### DLLM_WAITING_QUEUE
+NUM_THREADS="${NUM_THREADS:-100}"   ######################## DLLM max concurrent request
+DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-100}" ###### DLLM_WAITING_QUEUE
 SCHEDULER="${SCHEDULER:-LST}"               # LST | PREFILL | DECODE | FCFS | SOLA
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-5.0}"    # strict SLO = multiplier × ideal latency
 RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-25.0}" # release SLO = multiplier × ideal latency

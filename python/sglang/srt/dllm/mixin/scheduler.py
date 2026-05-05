@@ -133,7 +133,6 @@ class SchedulerDllmMixin:
         block_emit_time = time.perf_counter()
         has_output = False
         has_finished = False
-        has_prefill_progress = False
 
         if next_token_ids_list or updated_ids or pending_kv_save or kv_saved:
             self.token_to_kv_pool_allocator.free_group_begin()
@@ -145,7 +144,6 @@ class SchedulerDllmMixin:
                 # track last prefill forward end time (updated every prefill batch)
                 if idx < len(req_modes_in_batch) and req_modes_in_batch[idx] == "prefill":
                     req.dllm_prefill_end_time = block_emit_time
-                    has_prefill_progress = True
 
                 if idx < len(updated_ids) and updated_ids[idx] is not None:
                     req.dllm_active_ids = updated_ids[idx].tolist()
@@ -215,9 +213,8 @@ class SchedulerDllmMixin:
             if has_output or has_finished:
                 self.stream_output(batch.reqs, batch.return_logprob)
 
-            # Block completion changes deadlines/phase, and prefill progress
-            # changes remaining prefill compute. Both affect slack ordering.
-            if has_output or has_prefill_progress:
+            # Block completion changes dllm_current_deadline → re-sort needed.
+            if has_output:
                 self.dllm_manager.queue_dirty = True
             self.token_to_kv_pool_allocator.free_group_end()
 
@@ -1280,5 +1277,8 @@ class DllmManager:
                 continue
             self.waiting_queue.append(req)
             queued_rids.add(req.rid)
-            self.queue_dirty = True
+            # STAGING_DECODE bypasses capacity checks regardless of sort order;
+            # only non-STAGING_DECODE requests affect the competitive ranking.
+            if req.dllm_phase != DllmReqPhase.STAGING_DECODE:
+                self.queue_dirty = True
         self.pending_next_round_reqs = []
