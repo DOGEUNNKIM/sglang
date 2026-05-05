@@ -64,7 +64,7 @@ class SchedulerDllmMixin:
             self.running_batch.batch_is_full = False
 
         # Early exit if batch is full or no requests available
-        if self._should_skip_prefill():
+        if self._should_skip_scheduling():
             return None
 
         running_bs = len(self.running_batch.reqs)
@@ -120,7 +120,9 @@ class SchedulerDllmMixin:
         batch: ScheduleBatch,
         result: GenerationBatchResult,
     ):
-        if result.copy_done is not None:
+        if result.copy_done is not None and self._dllm_result_needs_copy_sync(
+            batch, result
+        ):
             result.copy_done.synchronize()
 
         updated_ids = getattr(result, "dllm_updated_ids", None) or []
@@ -131,6 +133,7 @@ class SchedulerDllmMixin:
         block_emit_time = time.perf_counter()
         has_output = False
         has_finished = False
+        has_prefill_progress = False
 
         if next_token_ids_list or updated_ids or pending_kv_save or kv_saved:
             self.token_to_kv_pool_allocator.free_group_begin()
@@ -142,6 +145,7 @@ class SchedulerDllmMixin:
                 # track last prefill forward end time (updated every prefill batch)
                 if idx < len(req_modes_in_batch) and req_modes_in_batch[idx] == "prefill":
                     req.dllm_prefill_end_time = block_emit_time
+                    has_prefill_progress = True
 
                 if idx < len(updated_ids) and updated_ids[idx] is not None:
                     req.dllm_active_ids = updated_ids[idx].tolist()
@@ -210,9 +214,11 @@ class SchedulerDllmMixin:
 
             if has_output or has_finished:
                 self.stream_output(batch.reqs, batch.return_logprob)
-                # Block completion changes deadlines/phase → re-sort next schedule.
-                if has_output:
-                    self.dllm_manager.queue_dirty = True
+
+            # Block completion changes deadlines/phase, and prefill progress
+            # changes remaining prefill compute. Both affect slack ordering.
+            if has_output or has_prefill_progress:
+                self.dllm_manager.queue_dirty = True
             self.token_to_kv_pool_allocator.free_group_end()
 
         can_run_cuda_graph = getattr(result, "can_run_cuda_graph", False)
@@ -221,6 +227,32 @@ class SchedulerDllmMixin:
             prefill_stats=batch.prefill_stats,
             can_run_cuda_graph=can_run_cuda_graph,
             dp_cooperation_info=batch.dp_cooperation_info,
+        )
+
+    def _dllm_result_needs_copy_sync(
+        self: Scheduler,
+        batch: ScheduleBatch,
+        result: GenerationBatchResult,
+    ) -> bool:
+        """Return whether DLM output processing must wait for async CPU copies."""
+        if batch.return_logprob:
+            return True
+
+        # Legacy DLM algorithms may return GPU tensors copied asynchronously by
+        # GenerationBatchResult.copy_to_cpu(). Keep the existing synchronization
+        # unless this is the extended DLM result format used by low-confidence.
+        if getattr(result, "dllm_req_modes", None) is None:
+            return True
+
+        def has_gpu_tensor(obj) -> bool:
+            if hasattr(obj, "device"):
+                return getattr(obj.device, "type", None) != "cpu"
+            if isinstance(obj, (list, tuple)):
+                return any(has_gpu_tensor(item) for item in obj)
+            return False
+
+        return has_gpu_tensor(result.next_token_ids) or has_gpu_tensor(
+            getattr(result, "dllm_updated_ids", None)
         )
 
     def _maybe_log_dllm_request_latency(self: Scheduler, req: Req) -> None:
@@ -715,8 +747,8 @@ class SchedulerDllmMixin:
             )
         self.dllm_manager.waiting_queue = synced_queue
 
-    def _should_skip_prefill(self: Scheduler) -> bool:
-        """Check if DLLM prefill should be skipped."""
+    def _should_skip_scheduling(self: Scheduler) -> bool:
+        """Return True when there is no useful DLLM scheduling work to do."""
         if (
             self.running_batch.batch_is_full or not self.waiting_queue
         ) and self.dllm_manager.is_empty():
@@ -816,16 +848,15 @@ class SchedulerDllmMixin:
         Within each group requests are ordered by ascending slack (LST-style).
         The is_staging check inside the loop handles KV-memory routing per request.
         """
-        scheduled_rids: Set[str] = {req.rid for req in adder.can_run_list}
+        scheduled_rids: Set[str] = set()
         queuing_capacity_exhausted = False
+        running_bs = len(self.running_batch.reqs)
 
         # Reuse the slack-sorted waiting_queue from _sort_dllm_by_laxity().
         # O(n) partition preserves the sorted order — no additional sort needed.
         ttfb_group: List[Req] = []
         tpob_group: List[Req] = []
         for r in self.dllm_manager.waiting_queue:
-            if r.rid in scheduled_rids:
-                continue
             if r.dllm_first_block_time is None:
                 ttfb_group.append(r)
             else:
@@ -834,6 +865,9 @@ class SchedulerDllmMixin:
         ordered = (tpob_group + ttfb_group) if decode_first else (ttfb_group + tpob_group)
 
         for req in ordered:
+            if req.rid in scheduled_rids:
+                continue
+
             if req.dllm_phase == DllmReqPhase.STAGING_DECODE:
                 # Always schedule: mid-block active state or kv_save-completed decode.
                 req.dllm_scheduled_source_phase = req.dllm_phase
@@ -848,7 +882,6 @@ class SchedulerDllmMixin:
                 if queuing_capacity_exhausted:
                     continue
 
-                running_bs = len(self.running_batch.reqs)
                 if len(adder.can_run_list) >= self.get_num_allocatable_reqs(running_bs):
                     self.running_batch.batch_is_full = True
                     if (
@@ -857,6 +890,7 @@ class SchedulerDllmMixin:
                     ):
                         queuing_capacity_exhausted = True
                         continue
+                    running_bs = len(self.running_batch.reqs)
 
                 req.dllm_scheduled_source_phase = req.dllm_phase
                 if req.dllm_phase == DllmReqPhase.STAGING_PREFILL:
@@ -947,10 +981,9 @@ class SchedulerDllmMixin:
         requests, queuing requests are skipped but the traversal continues so that
         urgent staging requests further down the sorted list are not blocked.
         """
-        scheduled_rids: Set[str] = {req.rid for req in adder.can_run_list}
-        # Once the batch is full for new requests, flip this flag to skip
-        # subsequent queuing reqs without re-evaluating capacity each time.
+        scheduled_rids: Set[str] = set()
         queuing_capacity_exhausted = False
+        running_bs = len(self.running_batch.reqs)
 
         for req in self.dllm_manager.waiting_queue:
             if req.rid in scheduled_rids:
@@ -972,7 +1005,6 @@ class SchedulerDllmMixin:
                 if queuing_capacity_exhausted:
                     continue  # Batch full; still scan for STAGING_DECODE further down
 
-                running_bs = len(self.running_batch.reqs)
                 if len(adder.can_run_list) >= self.get_num_allocatable_reqs(running_bs):
                     self.running_batch.batch_is_full = True
                     if (
@@ -982,6 +1014,7 @@ class SchedulerDllmMixin:
                         queuing_capacity_exhausted = True
                         continue  # Skip this req; keep scanning for STAGING_DECODE
                     # Preemption succeeded; batch is no longer full
+                    running_bs = len(self.running_batch.reqs)
 
                 req.dllm_scheduled_source_phase = req.dllm_phase
                 if req.dllm_phase == DllmReqPhase.STAGING_PREFILL:
@@ -1240,11 +1273,12 @@ class DllmManager:
 
     def init_next_round(self) -> None:
         """Initialize previous-forward requests for next round and clear them."""
+        queued_rids = {req.rid for req in self.waiting_queue}
         for req in self.pending_next_round_reqs:
             req.init_next_round_input()
-            if not req.finished() and all(
-                waiting_req.rid != req.rid for waiting_req in self.waiting_queue
-            ):
-                self.waiting_queue.append(req)
-                self.queue_dirty = True
+            if req.finished() or req.rid in queued_rids:
+                continue
+            self.waiting_queue.append(req)
+            queued_rids.add(req.rid)
+            self.queue_dirty = True
         self.pending_next_round_reqs = []
