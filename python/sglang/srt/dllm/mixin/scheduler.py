@@ -772,14 +772,10 @@ class SchedulerDllmMixin:
             slo_type = req.dllm_slo_type or "strict"
 
             if req.dllm_first_block_time is None:
-                # TTFB pressure: only QUEUING requests contribute — STAGING requests
-                # (STAGING_PREFILL, STAGING_DECODE first block) are already committed
-                # (KV allocated) and will be processed regardless of the scheduling
-                # decision, so they should not drive the admit-first signal.
-                if req.dllm_phase not in (
-                    DllmReqPhase.QUEUING_PREFILL,
-                    DllmReqPhase.QUEUING_DECODE,
-                ):
+                # TTFB pressure: QUEUING and STAGING_PREFILL requests contribute —
+                # STAGING_PREFILL now competes for capacity alongside queuing requests.
+                # STAGING_DECODE is excluded: always scheduled regardless of pressure.
+                if req.dllm_phase == DllmReqPhase.STAGING_DECODE:
                     continue
                 ttfb_slo = (
                     cfg.strict_ttfb_slo if slo_type == "strict" else cfg.release_ttfb_slo
@@ -838,12 +834,8 @@ class SchedulerDllmMixin:
         ordered = (tpob_group + ttfb_group) if decode_first else (ttfb_group + tpob_group)
 
         for req in ordered:
-            is_staging = req.dllm_phase in (
-                DllmReqPhase.STAGING_PREFILL,
-                DllmReqPhase.STAGING_DECODE,
-            )
-
-            if is_staging:
+            if req.dllm_phase == DllmReqPhase.STAGING_DECODE:
+                # Always schedule: mid-block active state or kv_save-completed decode.
                 req.dllm_scheduled_source_phase = req.dllm_phase
                 self._restore_dllm_active_prefix_indices(req)
                 res = adder.add_dllm_staging_req(req)
@@ -852,6 +844,7 @@ class SchedulerDllmMixin:
                     break  # KV memory exhausted
                 scheduled_rids.add(req.rid)
             else:
+                # STAGING_PREFILL, QUEUING_PREFILL, QUEUING_DECODE — all compete.
                 if queuing_capacity_exhausted:
                     continue
 
@@ -866,13 +859,17 @@ class SchedulerDllmMixin:
                         continue
 
                 req.dllm_scheduled_source_phase = req.dllm_phase
-                req.init_next_round_input(self.tree_cache)
+                if req.dllm_phase == DllmReqPhase.STAGING_PREFILL:
+                    self._restore_dllm_active_prefix_indices(req)
+                    res = adder.add_dllm_staging_req(req)
+                else:
+                    req.init_next_round_input(self.tree_cache)
+                    res = adder.add_one_req(
+                        req,
+                        has_chunked_req=True,
+                        truncation_align_size=self.truncation_align_size,
+                    )
                 req.dllm_scheduled_exec_phase = req.dllm_phase
-                res = adder.add_one_req(
-                    req,
-                    has_chunked_req=True,
-                    truncation_align_size=self.truncation_align_size,
-                )
                 if res != AddReqResult.CONTINUE:
                     if res == AddReqResult.NO_TOKEN:
                         self.running_batch.batch_is_full = True
@@ -959,12 +956,9 @@ class SchedulerDllmMixin:
             if req.rid in scheduled_rids:
                 continue
 
-            is_staging = req.dllm_phase in (
-                DllmReqPhase.STAGING_PREFILL,
-                DllmReqPhase.STAGING_DECODE,
-            )
-
-            if is_staging:
+            if req.dllm_phase == DllmReqPhase.STAGING_DECODE:
+                # Always schedule: mid-block active state or kv_save-completed decode.
+                # Delaying would waste already-committed KV memory.
                 req.dllm_scheduled_source_phase = req.dllm_phase
                 self._restore_dllm_active_prefix_indices(req)
                 res = adder.add_dllm_staging_req(req)
@@ -973,9 +967,10 @@ class SchedulerDllmMixin:
                     break  # KV memory exhausted; no further requests can be added
                 scheduled_rids.add(req.rid)
             else:
-                # QUEUING_PREFILL or QUEUING_DECODE
+                # STAGING_PREFILL, QUEUING_PREFILL, QUEUING_DECODE — all compete by LST slack.
+                # STAGING_PREFILL: completed blocks are in tree cache; deferring is safe.
                 if queuing_capacity_exhausted:
-                    continue  # Batch full for new reqs; still scan for staging reqs
+                    continue  # Batch full; still scan for STAGING_DECODE further down
 
                 running_bs = len(self.running_batch.reqs)
                 if len(adder.can_run_list) >= self.get_num_allocatable_reqs(running_bs):
@@ -985,17 +980,21 @@ class SchedulerDllmMixin:
                         or not adder.preempt_to_schedule(req, self.server_args)
                     ):
                         queuing_capacity_exhausted = True
-                        continue  # Skip this queuing req; keep scanning for staging
+                        continue  # Skip this req; keep scanning for STAGING_DECODE
                     # Preemption succeeded; batch is no longer full
 
                 req.dllm_scheduled_source_phase = req.dllm_phase
-                req.init_next_round_input(self.tree_cache)
+                if req.dllm_phase == DllmReqPhase.STAGING_PREFILL:
+                    self._restore_dllm_active_prefix_indices(req)
+                    res = adder.add_dllm_staging_req(req)
+                else:
+                    req.init_next_round_input(self.tree_cache)
+                    res = adder.add_one_req(
+                        req,
+                        has_chunked_req=True,
+                        truncation_align_size=self.truncation_align_size,
+                    )
                 req.dllm_scheduled_exec_phase = req.dllm_phase
-                res = adder.add_one_req(
-                    req,
-                    has_chunked_req=True,
-                    truncation_align_size=self.truncation_align_size,
-                )
                 if res != AddReqResult.CONTINUE:
                     if res == AddReqResult.NO_TOKEN:
                         self.running_batch.batch_is_full = True

@@ -149,9 +149,15 @@ class ReqDllmMixin:
 
         cfg = self.dllm_config
         block_size = cfg.block_size
-        # Inline Bellman lookup: dllm_active_remaining_masks is always in [0, block_size]
-        # when set, so clamping is unnecessary. Fall back to block_size when no active block.
-        r = self.dllm_active_remaining_masks if self.dllm_active_remaining_masks is not None else block_size
+        if self.dllm_active_remaining_masks is not None:
+            r = self.dllm_active_remaining_masks
+        elif self.dllm_first_block_time is None:
+            # TTFB phase: first decode block may be partial when input_len % block_size != 0.
+            # e.g. input=40 tokens, block_size=32 → first decode block has 24 masks, not 32.
+            partial = len(self.origin_input_ids) % block_size
+            r = block_size if partial == 0 else block_size - partial
+        else:
+            r = block_size
         decode_forwards = max(1, math.ceil(cfg.decode_safety_factor * cfg.decode_forwards_by_remaining[r]))
 
         if self.dllm_first_block_time is None:
