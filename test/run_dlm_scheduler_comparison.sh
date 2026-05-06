@@ -6,8 +6,12 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_sched_comparison}"
 BLOCK_SIZE="${BLOCK_SIZE:-32}"
 WARMUP="${WARMUP:-16}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
-REQUEST_RATES=(${REQUEST_RATES:-2 4 6 8 10 12 14})
-TASKS=(${TASKS:-humaneval gsm8k}) # humaneval gsm8k math
+REQUEST_RATES=(${REQUEST_RATES:-})  # fallback when task has no per-task rates
+TASKS=(${TASKS:-gsm8k humaneval}) #gsm8k humaneval math
+# Per-task request rates (overridable via env vars)
+RATES_GSM8K="${RATES_GSM8K:-6 6.5 7 7.5 8}"
+RATES_HUMANEVAL="${RATES_HUMANEVAL:-10 11 12 13 14}"
+RATES_MATH="${RATES_MATH:-1.5 2.0}" #1.5 2.0 2.5
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
 # NUM_THREADS / DLLM_ADMISSION_WINDOW: when unset, auto-detected from full dataset size per task.
 NUM_THREADS="${NUM_THREADS:-}"
@@ -15,22 +19,18 @@ DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-}"
 PORT="${PORT:-30000}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 THRESHOLD="${THRESHOLD:-0.95}"
-SCHEDULERS=(${SCHEDULERS:-LST FCFS PREFILL TTFB DECODE})
+SCHEDULERS=(${SCHEDULERS:-TTFB DECODE LST SOLA FCFS PREFILL}) # TTFB DECODE
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-5.0}"
 RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-25.0}"
-STRICT_PROB="${STRICT_PROB:-0.5}"
+STRICT_PROB="${STRICT_PROB:-1}"
 FORWARD_TIME_S="${FORWARD_TIME_S:-0.030}"
 PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"
 DECODE_FORWARD_TIME_S="${DECODE_FORWARD_TIME_S:-}"
 CONFIG_PATH="${CONFIG_PATH:-/tmp/dlm_algo_config_sched_cmp.yaml}"
-STEP_LOG_FILE="${STEP_LOG_FILE:-/tmp/dlm_step_stats_cmp.jsonl}"
-REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-/tmp/dlm_request_latency_cmp.jsonl}"
-BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-/tmp/dlm_batch_latency_cmp.jsonl}"
+STEP_LOG_FILE="${STEP_LOG_FILE:-/tmp/dlm_step_stats.jsonl}"
+REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-/tmp/dlm_request_latency.jsonl}"
+BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-/tmp/dlm_batch_latency.jsonl}"
 TP_SIZE="${TP_SIZE:-1}"
-# Calibration: rate and example count for ideal TTFB/TPOB measurement.
-# CALIB_RATE should be high enough that the GPU batch is typically full.
-CALIB_RATE="${CALIB_RATE:-4}"
-CALIB_NUM_EXAMPLES="${CALIB_NUM_EXAMPLES:-100}"
 
 SERVER_PID=""
 
@@ -115,57 +115,24 @@ stop_server() {
             # shellcheck disable=SC2086
             kill -9 ${child_pids} >/dev/null 2>&1 || true
         fi
-        sleep 2
+        # Wait for GPU memory to be released (CUDA holds memory until process fully exits)
+        local _gpu_deadline=$(( SECONDS + 60 ))
+        until python3 -c "
+import subprocess, sys
+out = subprocess.check_output(['nvidia-smi','--query-gpu=memory.free','--format=csv,noheader,nounits']).decode()
+free_mb = int(out.strip().split('\n')[0])
+sys.exit(0 if free_mb > 40000 else 1)" 2>/dev/null; do
+            if (( SECONDS >= _gpu_deadline )); then
+                echo "[server] WARNING: GPU memory not fully released after 60s, proceeding anyway" >&2
+                break
+            fi
+            echo "[server] waiting for GPU memory release..."
+            sleep 3
+        done
     fi
     SERVER_PID=""
 }
 
-# _run_calib_bench SCHEDULER_MODE ADMISSION_WINDOW OUT_DIR TASK [--num-examples N]
-# Starts server, runs benchmark, stops server.
-_run_calib_bench() {
-    local _mode="${1}" _window="${2}" _out="${3}" _task="${4}"
-    shift 4
-    mkdir -p "${_out}"
-
-    write_dllm_config "" "" "" "" "${_mode}" "${_window}"
-    echo "===== calib mode=${_mode} task=${_task} =====" >> "${SERVER_LOG}"
-
-    PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.6 \
-    python -m sglang.launch_server \
-        --model-path "${MODEL_PATH}" \
-        --port "${PORT}" \
-        --trust-remote-code \
-        --dllm-algorithm LowConfidence \
-        --dllm-algorithm-config "${CONFIG_PATH}" \
-        --attention-backend flashinfer \
-        --max-running-requests "${MAX_RUNNING_REQUESTS}" \
-        --cuda-graph-max-bs "${MAX_RUNNING_REQUESTS}" \
-        --disable-cuda-graph-padding \
-        --tp-size "${TP_SIZE}" \
-        >> "${SERVER_LOG}" 2>&1 &
-    SERVER_PID=$!
-    echo "[calib server] pid=${SERVER_PID}, waiting for ${BASE_URL}/health"
-    wait_server_ready
-    echo "[calib server] ready"
-
-    PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.6 \
-    python test/dlm_benchmark.py \
-        --base-url "${BASE_URL}" \
-        --model "${MODEL_PATH}" \
-        --tasks "${_task}" \
-        --block-size "${BLOCK_SIZE}" \
-        --log \
-        --request-rate "${CALIB_RATE}" \
-        --num-threads "${CALIB_NUM_EXAMPLES}" \
-        --num-examples "${CALIB_NUM_EXAMPLES}" \
-        --warmup "${WARMUP}" \
-        --num-output-blocks "${NUM_OUTPUT_BLOCKS}" \
-        --output-dir "${_out}" \
-        --tp-size "${TP_SIZE}" \
-        "$@"
-
-    stop_server
-}
 
 # _parse_calib_metric OUT_DIR TASK FIELD
 # Prints the value of FIELD from {task}_{model_tag}.json, or "" if missing.
@@ -177,7 +144,7 @@ _parse_calib_metric() {
 import json, sys
 try:
     d = json.load(open('${_json}'))
-    v = d.get('${_field}')
+    v = d.get('${_field}') or d.get('latency_stats', {}).get('${_field}')
     print('' if v is None else f'{v:.4f}')
 except Exception:
     print('')
@@ -189,50 +156,48 @@ trap stop_server EXIT
 SERVER_LOG="${OUTPUT_ROOT}/server_log.txt"
 mkdir -p "${OUTPUT_ROOT}"
 
-# ── Calibration phase ────────────────────────────────────────────────────────
-# ideal TTFB: TTFB scheduler (minimises time-to-first-block)
-# ideal TPOB: DECODE scheduler (batch always full, decode-only throughput)
-echo
-echo "============================================================"
-echo "Calibration: measuring ideal TTFB (TTFB sched) and TPOB (DECODE sched)"
-echo "  rate=${CALIB_RATE} req/s, ${CALIB_NUM_EXAMPLES} examples per task"
-echo "============================================================"
+# Kill any stale server already occupying the port (leftover from a prior run).
+_stale_pid=$(lsof -ti tcp:"${PORT}" 2>/dev/null || true)
+if [[ -n "${_stale_pid}" ]]; then
+    echo "[startup] killing stale process(es) on port ${PORT}: ${_stale_pid}"
+    kill -9 ${_stale_pid} 2>/dev/null || true
+    _gpu_deadline=$(( SECONDS + 60 ))
+    until python3 -c "
+import subprocess, sys
+out = subprocess.check_output(['nvidia-smi','--query-gpu=memory.free','--format=csv,noheader,nounits']).decode()
+free_mb = int(out.strip().split('\n')[0])
+sys.exit(0 if free_mb > 40000 else 1)" 2>/dev/null; do
+        if (( SECONDS >= _gpu_deadline )); then
+            echo "[startup] WARNING: GPU memory not fully released after 60s, proceeding anyway" >&2
+            break
+        fi
+        echo "[startup] waiting for GPU memory release..."
+        sleep 3
+    done
+fi
 
 declare -A IDEAL_TTFB_MS IDEAL_TPOB_MS
+declare -A IDEAL_TTFB_BY_RATE IDEAL_TPOB_BY_RATE  # key: "${TASK}_${RATE}"
 
-for TASK in "${TASKS[@]}"; do
-    CALIB_TTFB_DIR="${OUTPUT_ROOT}/calibration/ttfb/${TASK}"
-    CALIB_TPOB_DIR="${OUTPUT_ROOT}/calibration/decode/${TASK}"
-
-    echo "[calib] task=${TASK}: running TTFB scheduler..."
-    _run_calib_bench "ttfb" "$(_task_dataset_size "${TASK}")" "${CALIB_TTFB_DIR}" "${TASK}"
-    _ttfb=$(_parse_calib_metric "${CALIB_TTFB_DIR}" "${TASK}" "p50_ttfb_ms")
-
-    echo "[calib] task=${TASK}: running DECODE scheduler..."
-    _run_calib_bench "prefill" "${MAX_RUNNING_REQUESTS}" "${CALIB_TPOB_DIR}" "${TASK}"
-    _tpob=$(_parse_calib_metric "${CALIB_TPOB_DIR}" "${TASK}" "p50_tpob_ms")
-
-    if [[ -z "${_ttfb}" || "${_ttfb}" == "None" ]]; then
-        echo "[calib] WARNING: could not parse ideal TTFB for ${TASK}; SLOs will be empty" >&2
-        _ttfb=""
-    fi
-    if [[ -z "${_tpob}" || "${_tpob}" == "None" ]]; then
-        echo "[calib] WARNING: could not parse ideal TPOB for ${TASK}; SLOs will be empty" >&2
-        _tpob=""
-    fi
-
-    IDEAL_TTFB_MS["${TASK}"]="${_ttfb}"
-    IDEAL_TPOB_MS["${TASK}"]="${_tpob}"
-    echo "[calib] task=${TASK}  ideal_ttfb=${_ttfb}ms  ideal_tpob=${_tpob}ms"
-done
+# Returns space-separated rates for a given task.
+_task_rates() {
+    case "${1}" in
+        gsm8k)     echo "${RATES_GSM8K}" ;;
+        humaneval) echo "${RATES_HUMANEVAL}" ;;
+        math)      echo "${RATES_MATH}" ;;
+        *)         echo "${REQUEST_RATES[*]}" ;;
+    esac
+}
 
 # ── Main comparison ──────────────────────────────────────────────────────────
 for SCHEDULER in "${SCHEDULERS[@]}"; do
-    for RATE in "${REQUEST_RATES[@]}"; do
+    for TASK in "${TASKS[@]}"; do
+        _rates=($(_task_rates "${TASK}"))
+        for RATE in "${_rates[@]}"; do
         OUT_DIR="${OUTPUT_ROOT}/scheduler_${SCHEDULER}/request_rate_${RATE}"
         mkdir -p "${OUT_DIR}"
 
-        for TASK in "${TASKS[@]}"; do
+        {
             _task_size=$(_task_dataset_size "${TASK}")
             _task_threads="${NUM_THREADS:-${_task_size}}"
 
@@ -316,9 +281,80 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
             python "${BENCH_ARGS[@]}"
 
             stop_server
-        done  # TASK
-    done  # RATE
+        }  # TASK block
+        done  # RATE
+    done  # TASK
+
+    # After TTFB scheduler: use lowest per-task rate's p50_ttfb_ms as ideal TTFB
+    if [[ "${SCHEDULER}" == "TTFB" ]]; then
+        echo
+        echo "[ideal] TTFB sched — p50_ttfb_ms per rate:"
+        for TASK in "${TASKS[@]}"; do
+            _rates=($(_task_rates "${TASK}"))
+            _ref_rate="${_rates[0]}"
+            for _r in "${_rates[@]}"; do
+                _out="${OUTPUT_ROOT}/scheduler_TTFB/request_rate_${_r}"
+                _val=$(_parse_calib_metric "${_out}" "${TASK}" "p50_ttfb_ms")
+                IDEAL_TTFB_BY_RATE["${TASK}_${_r}"]="${_val:-}"
+                echo "  task=${TASK}  rate=${_r}  p50_ttfb=${_val:-N/A}ms"
+            done
+            _ttfb="${IDEAL_TTFB_BY_RATE["${TASK}_${_ref_rate}"]:-}"
+            if [[ -z "${_ttfb}" ]]; then
+                echo "[ideal] WARNING: could not parse ideal TTFB for ${TASK}" >&2
+            fi
+            IDEAL_TTFB_MS["${TASK}"]="${_ttfb}"
+            echo "  → task=${TASK}  ideal_ttfb=${_ttfb:-N/A}ms  (using rate=${_ref_rate})"
+        done
+    fi
+
+    # After DECODE scheduler: use maximum per-task rate's p50_tpob_ms as ideal TPOB
+    if [[ "${SCHEDULER}" == "DECODE" ]]; then
+        echo
+        echo "[ideal] DECODE sched — p50_tpob_ms per rate:"
+        for TASK in "${TASKS[@]}"; do
+            _rates=($(_task_rates "${TASK}"))
+            _max_tpob=""
+            for _r in "${_rates[@]}"; do
+                _out="${OUTPUT_ROOT}/scheduler_DECODE/request_rate_${_r}"
+                _val=$(_parse_calib_metric "${_out}" "${TASK}" "p50_tpob_ms")
+                IDEAL_TPOB_BY_RATE["${TASK}_${_r}"]="${_val:-}"
+                echo "  task=${TASK}  rate=${_r}  p50_tpob=${_val:-N/A}ms"
+                [[ -n "${_val}" && "${_val}" != "None" ]] && _max_tpob=$(python3 -c "
+v=float('${_val}'); cur='${_max_tpob}'
+print(f'{v:.4f}' if cur=='' else f'{max(v,float(cur)):.4f}')")
+            done
+            if [[ -z "${_max_tpob}" ]]; then
+                echo "[ideal] WARNING: could not parse ideal TPOB for ${TASK}" >&2
+            fi
+            IDEAL_TPOB_MS["${TASK}"]="${_max_tpob}"
+            echo "  → task=${TASK}  ideal_tpob=${_max_tpob:-N/A}ms  (max across rates)"
+        done
+    fi
+
 done  # SCHEDULER
+
+# ── Write calibrated SLO config for dlm_slorate.py ───────────────────────────
+SLO_CONFIG_PATH="${OUTPUT_ROOT}/slo_config.json"
+python3 -c "
+import json, sys
+tasks = '${TASKS[*]}'.split()
+strict_m  = float('${STRICT_MULTIPLIER}')
+release_m = float('${RELEASE_MULTIPLIER}')
+ideal_ttfb = {$(for T in "${TASKS[@]}"; do echo "'${T}': float('${IDEAL_TTFB_MS[${T}]:-0}'),"; done)}
+ideal_tpob = {$(for T in "${TASKS[@]}"; do echo "'${T}': float('${IDEAL_TPOB_MS[${T}]:-0}'),"; done)}
+slos = {}
+for t in tasks:
+    ittfb, itpob = ideal_ttfb.get(t, 0), ideal_tpob.get(t, 0)
+    if ittfb > 0 and itpob > 0:
+        slos[t] = {
+            'strict':  {'ttfb_ms': ittfb * strict_m,  'tpob_ms': itpob * strict_m},
+            'relaxed': {'ttfb_ms': ittfb * release_m, 'tpob_ms': itpob * release_m},
+        }
+with open('${SLO_CONFIG_PATH}', 'w') as f:
+    json.dump(slos, f, indent=2)
+print('[slo_config] written to ${SLO_CONFIG_PATH}')
+print(json.dumps(slos, indent=2))
+"
 
 echo
 echo "============================================================"
@@ -326,20 +362,81 @@ echo "DLM Scheduler Comparison — SLO Summary"
 echo "============================================================"
 
 for SCHEDULER in "${SCHEDULERS[@]}"; do
-    for RATE in "${REQUEST_RATES[@]}"; do
-        OUT_DIR="${OUTPUT_ROOT}/scheduler_${SCHEDULER}/request_rate_${RATE}"
-        SLO_PATH="${OUT_DIR}/slo_rates.json"
+    for TASK in "${TASKS[@]}"; do
+        _rates=($(_task_rates "${TASK}"))
+        for RATE in "${_rates[@]}"; do
+            OUT_DIR="${OUTPUT_ROOT}/scheduler_${SCHEDULER}/request_rate_${RATE}"
+            SLO_PATH="${OUT_DIR}/slo_rates.json"
 
-        echo
-        echo "scheduler=${SCHEDULER}  request_rate=${RATE}"
-        echo "------------------------------------------------------------"
+            echo
+            echo "scheduler=${SCHEDULER}  task=${TASK}  request_rate=${RATE}"
+            echo "------------------------------------------------------------"
 
-        python test/dlm_slorate.py \
-            --latency-dir "${OUT_DIR}" \
-            --tasks "${TASKS[@]}" \
-            --output-json "${SLO_PATH}"
+            python test/dlm_slorate.py \
+                --latency-dir "${OUT_DIR}" \
+                --tasks "${TASK}" \
+                --slo-config "${SLO_CONFIG_PATH}" \
+                --output-json "${SLO_PATH}"
+        done
     done
 done
 
+# ── Consolidated SLO summary ──────────────────────────────────────────────────
+SUMMARY_PATH="${OUTPUT_ROOT}/slo_summary.json"
+python3 -c "
+import json, os
+from pathlib import Path
+
+output_root = '${OUTPUT_ROOT}'
+schedulers  = '${SCHEDULERS[*]}'.split()
+tasks       = '${TASKS[*]}'.split()
+task_rate_map = {
+    'gsm8k':     '${RATES_GSM8K}'.split(),
+    'humaneval': '${RATES_HUMANEVAL}'.split(),
+    'math':      '${RATES_MATH}'.split(),
+}
+
+summary = {}
+for sched in schedulers:
+    summary[sched] = {}
+    for task in tasks:
+        for rate in task_rate_map.get(task, []):
+            slo_path = Path(output_root) / f'scheduler_{sched}' / f'request_rate_{rate}' / 'slo_rates.json'
+            if not slo_path.exists():
+                continue
+            data = json.loads(slo_path.read_text())
+            if rate not in summary[sched]:
+                summary[sched][rate] = {}
+            if task not in data:
+                continue
+            rates_d = data[task].get('rates', {})
+            summary[sched][rate][task] = {
+                'strict_ttfb':  rates_d.get('strict_ttfb'),
+                'strict_tpob':  rates_d.get('strict_tpob'),
+                'strict_all':   rates_d.get('strict_all'),
+                'relaxed_ttfb': rates_d.get('relaxed_ttfb'),
+                'relaxed_tpob': rates_d.get('relaxed_tpob'),
+                'relaxed_all':  rates_d.get('relaxed_all'),
+            }
+
+Path('${SUMMARY_PATH}').write_text(json.dumps(summary, indent=2))
+print(f'[summary] saved → ${SUMMARY_PATH}')
+
+# Print table
+header = f\"{'Scheduler':<10} {'Task':<12} {'Rate':>6} {'Str-TTFB':>10} {'Str-TPOB':>10} {'Str-All':>9} {'Rel-TTFB':>10} {'Rel-TPOB':>10} {'Rel-All':>9}\"
+print()
+print(header)
+print('-' * len(header))
+def fmt(v): return f'{v:.3f}' if v is not None else 'N/A'
+for sched in schedulers:
+    for task in tasks:
+        for rate in task_rate_map.get(task, []):
+            r = summary.get(sched, {}).get(rate, {}).get(task)
+            if r is None:
+                continue
+            print(f'{sched:<10} {task:<12} {rate:>6} {fmt(r[\"strict_ttfb\"]):>10} {fmt(r[\"strict_tpob\"]):>10} {fmt(r[\"strict_all\"]):>9} {fmt(r[\"relaxed_ttfb\"]):>10} {fmt(r[\"relaxed_tpob\"]):>10} {fmt(r[\"relaxed_all\"]):>9}')
+"
+
 echo
 echo "Done. Results are under ${OUTPUT_ROOT}/scheduler_*/request_rate_*/"
+echo "Consolidated SLO summary: ${SUMMARY_PATH}"
