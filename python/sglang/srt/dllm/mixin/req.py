@@ -177,6 +177,30 @@ class ReqDllmMixin:
 
         return self.dllm_current_deadline - now - remaining_compute
 
+    def compute_remaining_ttfb_compute(self: Req) -> float:
+        """Estimated remaining compute before first block emission (seconds).
+
+        Used by TTFB-priority scheduling to order requests by closeness to
+        their first block.  Returns inf for TPOB-phase requests (first block
+        already emitted) so they sort after all TTFB-phase requests.
+        """
+        if self.dllm_first_block_time is not None:
+            return float("inf")
+
+        cfg = self.dllm_config
+        block_size = cfg.block_size
+        if self.dllm_active_remaining_masks is not None:
+            r = self.dllm_active_remaining_masks
+        else:
+            partial = len(self.origin_input_ids) % block_size
+            r = block_size if partial == 0 else block_size - partial
+        decode_forwards = max(1, math.ceil(cfg.decode_safety_factor * cfg.decode_forwards_by_remaining[r]))
+
+        total_prefill = math.ceil(len(self.origin_input_ids) / block_size)
+        completed = max(len(self.prefix_indices), self.dllm_prefetched_prefix_len) // block_size
+        remaining_prefill = max(0, total_prefill - completed) if self.is_dllm_prefill() else 0
+        return remaining_prefill * cfg.prefill_forward_time_s + decode_forwards * cfg.decode_forward_time_s
+
     def get_dllm_ttfb(self: Req) -> Optional[float]:
         if self.dllm_first_block_time is None:
             return None

@@ -116,9 +116,18 @@ class DllmConfig:
         """True if SOLA-adapted pressure-based scheduling is active."""
         return self.scheduler_mode == "sola"
 
+    def use_ttfb(self) -> bool:
+        """True if TTFB-first scheduling is active.
+
+        Prioritises requests by ascending remaining compute before first block
+        emission.  TPOB-phase requests (first block already emitted) are placed
+        last and only scheduled when capacity remains.
+        """
+        return self.scheduler_mode == "ttfb"
+
     def use_unified_traversal(self) -> bool:
-        """True when the non-prefill-priority traversal path is used (LST, FCFS, or SOLA)."""
-        return self.use_lst() or self.use_fcfs() or self.use_sola()
+        """True when the non-prefill-priority traversal path is used (LST, FCFS, SOLA, or TTFB)."""
+        return self.use_lst() or self.use_fcfs() or self.use_sola() or self.use_ttfb()
 
     @staticmethod
     def from_server_args(

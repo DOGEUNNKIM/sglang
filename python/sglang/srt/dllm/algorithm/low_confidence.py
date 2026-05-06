@@ -127,23 +127,19 @@ class LowConfidence(DllmAlgorithm):
             needs_cpu_block[batch_id] = True
 
         if any(needs_cpu_block):
-            block_cpu = (
-                forward_batch.input_ids.reshape(batch_size, self.block_size)
-                .detach()
-                .cpu()
-            )
-            remaining_masks = (block_cpu == self.mask_id).any(dim=1).tolist()
-            for batch_id, needs_cpu in enumerate(needs_cpu_block):
-                if not needs_cpu:
-                    continue
-
+            cpu_indices = [i for i, needs in enumerate(needs_cpu_block) if needs]
+            block_gpu = forward_batch.input_ids.reshape(batch_size, self.block_size).detach()
+            # Transfer only rows that need CPU processing instead of the full batch
+            partial_cpu = block_gpu[cpu_indices].cpu()
+            for local_idx, batch_id in enumerate(cpu_indices):
                 mode = req_modes[batch_id]
                 if mode == "kv_save":
                     start = int(active_starts[batch_id])
-                    next_token_ids[batch_id] = block_cpu[batch_id, start:].clone()
+                    next_token_ids[batch_id] = partial_cpu[local_idx, start:].clone()
                 elif mode == "unmask":
-                    pending_kv_save[batch_id] = not bool(remaining_masks[batch_id])
-                    updated_ids[batch_id] = block_cpu[batch_id].clone()
+                    row = partial_cpu[local_idx]
+                    pending_kv_save[batch_id] = not (row == self.mask_id).any().item()
+                    updated_ids[batch_id] = row.clone()
 
         if self.step_log_file is not None:
             final_block_steps = [

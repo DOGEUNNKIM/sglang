@@ -684,6 +684,8 @@ class SchedulerDllmMixin:
 
         LST:  ascending slack (most urgent first).
         FCFS: ascending admission time (first arrived first served).
+        TTFB: ascending remaining TTFB compute (closest to first block first);
+              TPOB-phase requests (inf) sort last.
         Prefill-priority: no-op (order is irrelevant for that path).
 
         Skipped when queue_dirty is False — the ordering hasn't changed since
@@ -700,6 +702,10 @@ class SchedulerDllmMixin:
         elif cfg.use_fcfs():
             self.dllm_manager.waiting_queue.sort(
                 key=lambda req: req.dllm_admission_time or 0.0
+            )
+        elif cfg.use_ttfb():
+            self.dllm_manager.waiting_queue.sort(
+                key=lambda req: req.compute_remaining_ttfb_compute()
             )
         self.dllm_manager.queue_dirty = False
 
@@ -916,6 +922,8 @@ class SchedulerDllmMixin:
         fcfs:    unified traversal in arrival-time order.
         lst:     unified traversal in ascending slack order.
         sola:    two-group traversal driven by system-level TTFB/TPOB pressure.
+        ttfb:    unified traversal ordered by remaining TTFB compute (ascending);
+                 TPOB-phase requests sorted last.
         """
         forward_mode = ForwardMode.DLLM_EXTEND
 
