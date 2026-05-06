@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_PATH="${MODEL_PATH:-JetLM/SDAR-4B-Chat}" #inclusionAI/LLaDA2.0-mini
+MODEL_PATH="${MODEL_PATH:-inclusionAI/LLaDA2.0-mini}" #JetLM/SDAR-4B-Chat
 OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_results}"
-BLOCK_SIZE="${BLOCK_SIZE:-4}" #32
+BLOCK_SIZE="${BLOCK_SIZE:-32}" #4
 WARMUP="${WARMUP:-16}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 REQUEST_RATES=(${REQUEST_RATES:-8}) #0.5 1 1.5
-TASKS=(${TASKS:-gsm8k}) ##### TASK humaneval math gsm8k
-NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
+TASKS=(${TASKS:-math}) ##### TASK humaneval math gsm8k
+NUM_EXAMPLES="${NUM_EXAMPLES:-1000}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
 PORT="${PORT:-30000}"
 #DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-100}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 THRESHOLD="${THRESHOLD:-0.95}"
-NUM_THREADS_SWEEP=(${NUM_THREADS_SWEEP:-200})  # sweep values 50 100 150 200
+NUM_THREADS_SWEEP=(${NUM_THREADS_SWEEP:-1000})  # sweep values 50 100 150 200
 SCHEDULER="${SCHEDULER:-LST}"               # LST | PREFILL | DECODE | FCFS | SOLA | TTFB
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-5.0}"    # strict SLO = multiplier × ideal latency
 RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-25.0}" # release SLO = multiplier × ideal latency
@@ -22,7 +22,6 @@ STRICT_PROB="${STRICT_PROB:-1}"               # fraction of requests assigned st
 FORWARD_TIME_S="${FORWARD_TIME_S:-0.030}"          # shared fallback (s)
 PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"  # override prefill fwd time (s)
 DECODE_FORWARD_TIME_S="${DECODE_FORWARD_TIME_S:-}"    # override decode fwd time (s)
-EXPECTED_UNMASK_PER_FORWARD="${EXPECTED_UNMASK_PER_FORWARD:-}"  # avg tokens unmasked/fwd
 CONFIG_PATH="${CONFIG_PATH:-/tmp/dlm_algo_config.yaml}"
 STEP_LOG_FILE="${STEP_LOG_FILE:-/tmp/dlm_step_stats.jsonl}"
 REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-/tmp/dlm_request_latency.jsonl}"
@@ -31,60 +30,42 @@ TP_SIZE="${TP_SIZE:-1}"
 
 SERVER_PID=""
 
-# Ideal baseline TTFB latencies (ms) per task — used with SLO_MULTIPLIER.
-# Source: empirical single-request measurements.
+# Ideal baseline latencies (ms) per task — used with SLO_MULTIPLIER.
+# Source: empirical measurements with DECODE scheduler (TPOB) and TTFB scheduler (TTFB).
+# TODO: update with measurements for the current model.
 _ideal_ttfb_ms() {
     case "${1}" in
         gsm8k)     echo "417.2" ;;
         humaneval) echo "312.9" ;;
         math)      echo "404.5" ;;
-        *)         echo "417.2" ;;   # conservative fallback
+        *)         echo "417.2" ;;
     esac
 }
 
-# Default expected unmasked tokens per forward, derived from empirical ideal TPOB.
-# The effective ideal TPOB is computed as:
-#   ceil(block_size / expected_unmask_per_forward) * decode_forward_time_s
-_default_expected_unmask_per_forward() {
+_ideal_tpob_ms() {
     case "${1}" in
-        gsm8k)     echo "2.666666667" ;;  # 32 / ceil(348.5 ms / 30 ms) = 32 / 12
-        humaneval) echo "5.333333334" ;;  # 32 / ceil(158.8 ms / 30 ms) = 32 / 6
-        math)      echo "2.133333334" ;;  # 32 / ceil(436.5 ms / 30 ms) = 32 / 15
-        *)         echo "2.666666667" ;;
+        gsm8k)     echo "348.5" ;;
+        humaneval) echo "158.8" ;;
+        math)      echo "436.5" ;;
+        *)         echo "348.5" ;;
     esac
 }
 
-# Compute absolute SLO values and task-specific expected_unmask_per_forward.
-# Returns "ttfb_s tpob_s unmask_per_fwd" on stdout, or "" if LST is disabled.
-#
-# TPOB SLO is derived from the same decode-step estimate used by the scheduler:
-#   decode_steps = ceil(block_size / expected_unmask_per_forward)
-#   ideal_tpob_s = decode_steps * decode_forward_time_s
+# Compute absolute SLO values.
+# Returns "ttfb_s tpob_s" on stdout, or "" if multiplier is empty.
 _compute_task_slo() {
     local task="${1}" multiplier="${2}"
     if [[ -z "${multiplier}" ]]; then
         echo ""
         return
     fi
-    # Resolve effective decode forward time (may be overridden per-experiment)
-    local _decode_fwd_s="${DECODE_FORWARD_TIME_S:-${FORWARD_TIME_S}}"
-    local _unmask_per_fwd="${EXPECTED_UNMASK_PER_FORWARD:-$(_default_expected_unmask_per_forward "${task}")}"
     python3 -c "
-import math
-ttfb_ms     = float('$(_ideal_ttfb_ms "${task}")')
-block_size  = int('${BLOCK_SIZE}')
-decode_fwd_s = float('${_decode_fwd_s}')
-unmask_per_fwd = float('${_unmask_per_fwd}')
 m = float('${multiplier}')
-
-decode_steps = math.ceil(block_size / unmask_per_fwd)
-ideal_tpob_s = decode_steps * decode_fwd_s
-
-print(f'{ttfb_ms*m/1000:.4f} {ideal_tpob_s*m:.4f} {unmask_per_fwd:.4f}')
+print(f'{float(\"$(_ideal_ttfb_ms "${task}")\") * m / 1000:.4f} {float(\"$(_ideal_tpob_ms "${task}")\") * m / 1000:.4f}')
 "
 }
 
-# write_dllm_config STRICT_TTFB STRICT_TPOB RELEASE_TTFB RELEASE_TPOB UNMASK_PER_FWD SCHEDULER_MODE
+# write_dllm_config STRICT_TTFB STRICT_TPOB RELEASE_TTFB RELEASE_TPOB SCHEDULER_MODE
 # All SLO args are in seconds; empty = omit from YAML.
 # SCHEDULER_MODE: "lst" | "fcfs" | "prefill" — written as scheduler_mode to YAML.
 write_dllm_config() {
@@ -92,9 +73,7 @@ write_dllm_config() {
     local _strict_tpob="${2:-}"
     local _release_ttfb="${3:-}"
     local _release_tpob="${4:-}"
-    # Manual env var takes priority over the task-specific computed value
-    local _unmask_per_fwd="${EXPECTED_UNMASK_PER_FORWARD:-${5:-}}"
-    local _scheduler_mode="${6:-prefill}"
+    local _scheduler_mode="${5:-prefill}"
 
     cat > "${CONFIG_PATH}" <<EOF
 threshold: ${THRESHOLD}
@@ -106,13 +85,12 @@ step_log_file: ${STEP_LOG_FILE}
 request_latency_log_file: ${REQUEST_LATENCY_LOG_FILE}
 batch_latency_log_file: ${BATCH_LATENCY_LOG_FILE}
 EOF
-    [[ -n "${_strict_ttfb}" ]]           && echo "strict_ttfb_slo: ${_strict_ttfb}"                     >> "${CONFIG_PATH}"
-    [[ -n "${_strict_tpob}" ]]           && echo "strict_tpob_slo: ${_strict_tpob}"                     >> "${CONFIG_PATH}"
-    [[ -n "${_release_ttfb}" ]]          && echo "release_ttfb_slo: ${_release_ttfb}"                   >> "${CONFIG_PATH}"
-    [[ -n "${_release_tpob}" ]]          && echo "release_tpob_slo: ${_release_tpob}"                   >> "${CONFIG_PATH}"
-    [[ -n "${_unmask_per_fwd}" ]]        && echo "expected_unmask_per_forward: ${_unmask_per_fwd}"       >> "${CONFIG_PATH}"
-    [[ -n "${PREFILL_FORWARD_TIME_S}" ]] && echo "prefill_forward_time_s: ${PREFILL_FORWARD_TIME_S}"     >> "${CONFIG_PATH}"
-    [[ -n "${DECODE_FORWARD_TIME_S}" ]]  && echo "decode_forward_time_s: ${DECODE_FORWARD_TIME_S}"       >> "${CONFIG_PATH}"
+    [[ -n "${_strict_ttfb}" ]]           && echo "strict_ttfb_slo: ${_strict_ttfb}"                   >> "${CONFIG_PATH}"
+    [[ -n "${_strict_tpob}" ]]           && echo "strict_tpob_slo: ${_strict_tpob}"                   >> "${CONFIG_PATH}"
+    [[ -n "${_release_ttfb}" ]]          && echo "release_ttfb_slo: ${_release_ttfb}"                 >> "${CONFIG_PATH}"
+    [[ -n "${_release_tpob}" ]]          && echo "release_tpob_slo: ${_release_tpob}"                 >> "${CONFIG_PATH}"
+    [[ -n "${PREFILL_FORWARD_TIME_S}" ]] && echo "prefill_forward_time_s: ${PREFILL_FORWARD_TIME_S}"   >> "${CONFIG_PATH}"
+    [[ -n "${DECODE_FORWARD_TIME_S}" ]]  && echo "decode_forward_time_s: ${DECODE_FORWARD_TIME_S}"     >> "${CONFIG_PATH}"
     return 0
 }
 
@@ -182,10 +160,10 @@ for RATE in "${REQUEST_RATES[@]}"; do
         # Compute strict and release SLO values for all schedulers (scatter plot + LST deadlines).
         _strict_vals=$(_compute_task_slo "${TASK}" "${STRICT_MULTIPLIER}")
         _release_vals=$(_compute_task_slo "${TASK}" "${RELEASE_MULTIPLIER}")
-        read -r _strict_ttfb _strict_tpob _task_unmask_per_fwd <<< "${_strict_vals}"
-        read -r _release_ttfb _release_tpob _             <<< "${_release_vals}"
+        read -r _strict_ttfb _strict_tpob   <<< "${_strict_vals}"
+        read -r _release_ttfb _release_tpob <<< "${_release_vals}"
         if [[ -n "${_strict_vals}" ]]; then
-            echo "[slo] task=${TASK}  strict=${_strict_ttfb}s/${_strict_tpob}s  release=${_release_ttfb}s/${_release_tpob}s  unmask/fwd=${_task_unmask_per_fwd}  (${STRICT_MULTIPLIER}×/${RELEASE_MULTIPLIER}× ideal)"
+            echo "[slo] task=${TASK}  ideal=$(_ideal_ttfb_ms "${TASK}")ms(TTFB)/$(_ideal_tpob_ms "${TASK}")ms(TPOB)  strict=${_strict_ttfb}s/${_strict_tpob}s  release=${_release_ttfb}s/${_release_tpob}s  (${STRICT_MULTIPLIER}×/${RELEASE_MULTIPLIER}× ideal)"
         fi
 
         # Map SCHEDULER env var to scheduler_mode YAML value.
@@ -197,7 +175,7 @@ for RATE in "${REQUEST_RATES[@]}"; do
             *)      _scheduler_mode="prefill" ;;  # PREFILL, DECODE, or unrecognised
         esac
 
-        write_dllm_config "${_strict_ttfb:-}" "${_strict_tpob:-}" "${_release_ttfb:-}" "${_release_tpob:-}" "${_task_unmask_per_fwd:-}" "${_scheduler_mode}"
+        write_dllm_config "${_strict_ttfb:-}" "${_strict_tpob:-}" "${_release_ttfb:-}" "${_release_tpob:-}" "${_scheduler_mode}"
         echo "===== request_rate=${RATE} task=${TASK} =====" >> /tmp/dlm_results/run_dlm_slo_server_log.txt
 
         PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.6 \

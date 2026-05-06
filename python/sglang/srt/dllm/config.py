@@ -57,11 +57,10 @@ class DllmConfig:
         # then receives TD updates:
         #   V[before] <- (1 - alpha) * V[before] + alpha * (1 + V[after])
         # with alpha = max(alpha_min, alpha0) (fixed).
-        # Initialize V[r] = r / expected_unmask_per_forward so that the prior
-        # matches the EMA-based estimate used before convergence.
-        _init_rate = max(self.expected_unmask_per_forward, 1e-6)
+        # Initialize V[r] = r / 2 as a neutral prior: on average half the masks
+        # are resolved per forward, independent of task or model.
         self.decode_forwards_by_remaining: list[float] = [
-            float(remaining) / _init_rate
+            float(remaining) / 2.0
             for remaining in range(self.block_size + 1)
         ]
 
