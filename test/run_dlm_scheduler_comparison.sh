@@ -7,11 +7,11 @@ BLOCK_SIZE="${BLOCK_SIZE:-32}"
 WARMUP="${WARMUP:-16}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 REQUEST_RATES=(${REQUEST_RATES:-})  # fallback when task has no per-task rates
-TASKS=(${TASKS:-gsm8k humaneval}) #gsm8k humaneval math
+TASKS=(${TASKS:-gsm8k}) #gsm8k humaneval math
 # Per-task request rates (overridable via env vars)
-RATES_GSM8K="${RATES_GSM8K:-6 6.5 7 7.5 8}"
+RATES_GSM8K="${RATES_GSM8K:-6 6.5}" #6 6.5 7 7.5 8
 RATES_HUMANEVAL="${RATES_HUMANEVAL:-10 11 12 13 14}"
-RATES_MATH="${RATES_MATH:-1.5 2.0}" #1.5 2.0 2.5
+RATES_MATH="${RATES_MATH:-1.5 2.0}" #1.5 1.75 2.0 2.25 2.5
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
 # NUM_THREADS / DLLM_ADMISSION_WINDOW: when unset, auto-detected from full dataset size per task.
 NUM_THREADS="${NUM_THREADS:-}"
@@ -177,7 +177,6 @@ sys.exit(0 if free_mb > 40000 else 1)" 2>/dev/null; do
 fi
 
 declare -A IDEAL_TTFB_MS IDEAL_TPOB_MS
-declare -A IDEAL_TTFB_BY_RATE IDEAL_TPOB_BY_RATE  # key: "${TASK}_${RATE}"
 
 # Returns space-separated rates for a given task.
 _task_rates() {
@@ -285,53 +284,41 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
         done  # RATE
     done  # TASK
 
-    # After TTFB scheduler: use lowest per-task rate's p50_ttfb_ms as ideal TTFB
-    if [[ "${SCHEDULER}" == "TTFB" ]]; then
-        echo
-        echo "[ideal] TTFB sched — p50_ttfb_ms per rate:"
-        for TASK in "${TASKS[@]}"; do
-            _rates=($(_task_rates "${TASK}"))
-            _ref_rate="${_rates[0]}"
-            for _r in "${_rates[@]}"; do
-                _out="${OUTPUT_ROOT}/scheduler_TTFB/request_rate_${_r}"
-                _val=$(_parse_calib_metric "${_out}" "${TASK}" "p50_ttfb_ms")
-                IDEAL_TTFB_BY_RATE["${TASK}_${_r}"]="${_val:-}"
-                echo "  task=${TASK}  rate=${_r}  p50_ttfb=${_val:-N/A}ms"
-            done
-            _ttfb="${IDEAL_TTFB_BY_RATE["${TASK}_${_ref_rate}"]:-}"
-            if [[ -z "${_ttfb}" ]]; then
-                echo "[ideal] WARNING: could not parse ideal TTFB for ${TASK}" >&2
-            fi
-            IDEAL_TTFB_MS["${TASK}"]="${_ttfb}"
-            echo "  → task=${TASK}  ideal_ttfb=${_ttfb:-N/A}ms  (using rate=${_ref_rate})"
-        done
-    fi
-
-    # After DECODE scheduler: use maximum per-task rate's p50_tpob_ms as ideal TPOB
-    if [[ "${SCHEDULER}" == "DECODE" ]]; then
-        echo
-        echo "[ideal] DECODE sched — p50_tpob_ms per rate:"
-        for TASK in "${TASKS[@]}"; do
-            _rates=($(_task_rates "${TASK}"))
-            _max_tpob=""
-            for _r in "${_rates[@]}"; do
-                _out="${OUTPUT_ROOT}/scheduler_DECODE/request_rate_${_r}"
-                _val=$(_parse_calib_metric "${_out}" "${TASK}" "p50_tpob_ms")
-                IDEAL_TPOB_BY_RATE["${TASK}_${_r}"]="${_val:-}"
-                echo "  task=${TASK}  rate=${_r}  p50_tpob=${_val:-N/A}ms"
-                [[ -n "${_val}" && "${_val}" != "None" ]] && _max_tpob=$(python3 -c "
-v=float('${_val}'); cur='${_max_tpob}'
-print(f'{v:.4f}' if cur=='' else f'{max(v,float(cur)):.4f}')")
-            done
-            if [[ -z "${_max_tpob}" ]]; then
-                echo "[ideal] WARNING: could not parse ideal TPOB for ${TASK}" >&2
-            fi
-            IDEAL_TPOB_MS["${TASK}"]="${_max_tpob}"
-            echo "  → task=${TASK}  ideal_tpob=${_max_tpob:-N/A}ms  (max across rates)"
-        done
-    fi
-
 done  # SCHEDULER
+
+# ── Extract shared ideal times from dlm_benchmark.py internal computation ────
+# All schedulers use the SAME ideal (physics minimum, scheduler-independent).
+# We pick the first available scheduler's output at the highest rate per task.
+echo
+echo "============================================================"
+echo "Extracting shared ideal times (p50_ideal_ttfb_ms / p50_ideal_tpob_ms)"
+echo "Reference priority: FCFS > PREFILL > LST > SOLA > DECODE > TTFB"
+echo "Rate: highest per task (most saturated)"
+echo "============================================================"
+_REF_ORDER=(FCFS PREFILL LST SOLA DECODE TTFB)
+for TASK in "${TASKS[@]}"; do
+    _rates=($(_task_rates "${TASK}"))
+    _high_rate="${_rates[-1]}"
+    _ideal_ttfb=""
+    _ideal_tpob=""
+    for _ref in "${_REF_ORDER[@]}"; do
+        _out="${OUTPUT_ROOT}/scheduler_${_ref}/request_rate_${_high_rate}"
+        _ttfb=$(_parse_calib_metric "${_out}" "${TASK}" "p50_ideal_ttfb_ms")
+        _tpob=$(_parse_calib_metric "${_out}" "${TASK}" "p50_ideal_tpob_ms")
+        if [[ -n "${_ttfb}" && -n "${_tpob}" ]]; then
+            _ideal_ttfb="${_ttfb}"
+            _ideal_tpob="${_tpob}"
+            echo "  task=${TASK}  ref_sched=${_ref}  rate=${_high_rate}"
+            echo "    ideal_ttfb=${_ttfb}ms  ideal_tpob=${_tpob}ms"
+            break
+        fi
+    done
+    if [[ -z "${_ideal_ttfb}" || -z "${_ideal_tpob}" ]]; then
+        echo "[ideal] WARNING: could not extract ideal times for task=${TASK}" >&2
+    fi
+    IDEAL_TTFB_MS["${TASK}"]="${_ideal_ttfb}"
+    IDEAL_TPOB_MS["${TASK}"]="${_ideal_tpob}"
+done
 
 # ── Write calibrated SLO config for dlm_slorate.py ───────────────────────────
 SLO_CONFIG_PATH="${OUTPUT_ROOT}/slo_config.json"
