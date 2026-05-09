@@ -218,6 +218,11 @@ class ReqDllmMixin:
             return None
         return max(self.dllm_tpob_list)
 
+    def get_dllm_mean_tpob(self: Req) -> Optional[float]:
+        if self.dllm_tpob_count == 0:
+            return None
+        return self.dllm_tpob_sum / self.dllm_tpob_count
+
     def get_dllm_decode_delay(self: Req) -> Optional[float]:
         """Mean inter-block scheduling delay (block ready → block enters next batch)."""
         if self.dllm_decode_delay_count == 0:

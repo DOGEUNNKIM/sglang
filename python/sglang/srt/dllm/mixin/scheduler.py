@@ -265,6 +265,7 @@ class SchedulerDllmMixin:
 
         ttfb = req.get_dllm_ttfb()
         tpob = req.get_dllm_tpob()
+        mean_tpob = req.get_dllm_mean_tpob()
         decode_delay = req.get_dllm_decode_delay()
         first_unmask_gap = req.dllm_first_unmask_gap
         sched_wait_s = req.time_stats.get_queueing_time() if req.time_stats else None
@@ -285,6 +286,9 @@ class SchedulerDllmMixin:
             # TPOB is the max of adjacent output-block intervals.
             "tpob_s": tpob,
             "tpob_ms": None if tpob is None else tpob * 1000,
+            # Mean TPOB is kept for ideal compute-only calibration.
+            "mean_tpob_s": mean_tpob,
+            "mean_tpob_ms": None if mean_tpob is None else mean_tpob * 1000,
             "tpob_count": req.dllm_tpob_count,
             # Per-block intervals: index i = gap between block i and block i+1 (ms).
             # Length == num_output_blocks - 1.
@@ -293,6 +297,8 @@ class SchedulerDllmMixin:
             # mean inter-block scheduling delay (block ready → enters next batch)
             "decode_delay_s": decode_delay,
             "decode_delay_ms": None if decode_delay is None else decode_delay * 1000,
+            "mean_decode_delay_s": decode_delay,
+            "mean_decode_delay_ms": None if decode_delay is None else decode_delay * 1000,
             # prefill completion → first unmask batch assigned
             "first_unmask_gap_s": first_unmask_gap,
             "first_unmask_gap_ms": None if first_unmask_gap is None else first_unmask_gap * 1000,

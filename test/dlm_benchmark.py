@@ -759,8 +759,8 @@ def _ideal_ttfb_values(records: List[Dict[str, Any]]) -> List[float]:
 def _ideal_tpob_values(records: List[Dict[str, Any]]) -> List[float]:
     values = []
     for record in records:
-        tpob = record.get("tpob_ms")
-        decode_delay = record.get("decode_delay_ms")
+        tpob = record.get("mean_tpob_ms")
+        decode_delay = record.get("mean_decode_delay_ms")
         if tpob is None or decode_delay is None:
             continue
         values.append(float(tpob) - float(decode_delay))
@@ -891,8 +891,8 @@ def print_latency_summary(task: str, summary: Dict[str, Any]) -> None:
             [
                 ("ideal TTFB mean", "mean_ideal_ttfb_ms"),
                 ("ideal TTFB p95", "p95_ideal_ttfb_ms"),
-                ("ideal max TPOB mean", "mean_ideal_tpob_ms"),
-                ("ideal max TPOB p95", "p95_ideal_tpob_ms"),
+                ("ideal mean TPOB mean", "mean_ideal_tpob_ms"),
+                ("ideal mean TPOB p95", "p95_ideal_tpob_ms"),
             ],
         ),
         (
