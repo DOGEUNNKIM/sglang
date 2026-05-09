@@ -27,7 +27,7 @@ class _Req(ReqDllmMixin):
 
 
 class TestDllmLatencyMetrics(unittest.TestCase):
-    def test_ttfb_and_average_tpob(self):
+    def test_ttfb_and_max_tpob(self):
         req = _Req()
 
         req.record_dllm_block_emit_time(12.0)
@@ -39,7 +39,7 @@ class TestDllmLatencyMetrics(unittest.TestCase):
 
         self.assertEqual(req.dllm_output_block_count, 3)
         self.assertEqual(req.dllm_tpob_count, 2)
-        self.assertEqual(req.get_dllm_tpob(), 4.5)
+        self.assertEqual(req.get_dllm_tpob(), 6.0)
 
 
 if __name__ == "__main__":

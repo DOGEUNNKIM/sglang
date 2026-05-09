@@ -282,7 +282,7 @@ class SchedulerDllmMixin:
             ),
             "ttfb_s": ttfb,
             "ttfb_ms": None if ttfb is None else ttfb * 1000,
-            # TPOB is the mean of adjacent output-block intervals.
+            # TPOB is the max of adjacent output-block intervals.
             "tpob_s": tpob,
             "tpob_ms": None if tpob is None else tpob * 1000,
             "tpob_count": req.dllm_tpob_count,

@@ -881,9 +881,9 @@ def print_latency_summary(task: str, summary: Dict[str, Any]) -> None:
                 ("TTFB mean", "mean_ttfb_ms"),
                 ("TTFB p95", "p95_ttfb_ms"),
                 ("TTFB p99", "p99_ttfb_ms"),
-                ("TPOB mean", "mean_tpob_ms"),
-                ("TPOB p95", "p95_tpob_ms"),
-                ("TPOB p99", "p99_tpob_ms"),
+                ("max TPOB mean", "mean_tpob_ms"),
+                ("max TPOB p95", "p95_tpob_ms"),
+                ("max TPOB p99", "p99_tpob_ms"),
             ],
         ),
         (
@@ -891,8 +891,8 @@ def print_latency_summary(task: str, summary: Dict[str, Any]) -> None:
             [
                 ("ideal TTFB mean", "mean_ideal_ttfb_ms"),
                 ("ideal TTFB p95", "p95_ideal_ttfb_ms"),
-                ("ideal TPOB mean", "mean_ideal_tpob_ms"),
-                ("ideal TPOB p95", "p95_ideal_tpob_ms"),
+                ("ideal max TPOB mean", "mean_ideal_tpob_ms"),
+                ("ideal max TPOB p95", "p95_ideal_tpob_ms"),
             ],
         ),
         (
@@ -1512,7 +1512,7 @@ def plot_tpob_per_request(
     model_name: str,
     output_dir: str,
 ):
-    """Scatter + running-mean of mean TPOB per request, ordered by completion."""
+    """Scatter + running-mean of max TPOB per request, ordered by completion."""
     import matplotlib.pyplot as plt
     import numpy as np
 
@@ -1544,7 +1544,7 @@ def plot_tpob_per_request(
         x = np.arange(len(tpob_vals))
         arr = np.array(tpob_vals)
 
-        ax.scatter(x, arr, color=color, s=8, alpha=0.5, label="mean TPOB")
+        ax.scatter(x, arr, color=color, s=8, alpha=0.5, label="max TPOB")
 
         window = max(1, len(arr) // 20)
         kernel = np.ones(window) / window
@@ -1560,10 +1560,10 @@ def plot_tpob_per_request(
         ax.axhline(p95_v,  color="orange", linestyle=":",  linewidth=1.0,
                    label=f"p95={p95_v:.1f} ms")
 
-        ax.set_title(f"{task.upper()} — mean TPOB per request",
+        ax.set_title(f"{task.upper()} — max TPOB per request",
                      fontsize=12, fontweight="bold")
         ax.set_xlabel("Request index (completion order)", fontsize=10)
-        ax.set_ylabel("Mean TPOB (ms)", fontsize=10)
+        ax.set_ylabel("Max TPOB (ms)", fontsize=10)
         ax.yaxis.grid(True, linestyle="--", alpha=0.4)
         ax.legend(fontsize=8)
         ax.text(
@@ -1576,7 +1576,7 @@ def plot_tpob_per_request(
             bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
         )
 
-    fig.suptitle(f"Mean TPOB per request (completion order) — {model_name}", fontsize=13)
+    fig.suptitle(f"Max TPOB per request (completion order) — {model_name}", fontsize=13)
     fig.tight_layout()
     out_path = Path(output_dir) / f"tpob_per_request_{model_tag}.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -1679,7 +1679,7 @@ def plot_request_slo_scatter(
         ax.axhline(1.0, color="black", linestyle="--", linewidth=1.0)
         ax.set_title(f"{task.upper()} — request SLO map", fontsize=12, fontweight="bold")
         ax.set_xlabel("TTFB / TTFB SLO (per-tier)", fontsize=10)
-        ax.set_ylabel("Mean TPOB / TPOB SLO (per-tier)", fontsize=10)
+        ax.set_ylabel("Max TPOB / TPOB SLO (per-tier)", fontsize=10)
         ax.grid(True, linestyle="--", alpha=0.35)
         ax.legend(fontsize=7, loc="upper right")
 
@@ -1721,7 +1721,7 @@ def plot_request_raw_scatter(
     model_name: str,
     output_dir: str,
 ):
-    """Scatter requests by raw TTFB (ms) vs mean TPOB (ms).
+    """Scatter requests by raw TTFB (ms) vs max TPOB (ms).
 
     Tier colour and outcome marker/alpha follow the same scheme as
     plot_request_slo_scatter.  SLO reference lines are drawn at the
@@ -1815,7 +1815,7 @@ def plot_request_raw_scatter(
 
         ax.set_title(f"{task.upper()} — request raw latency", fontsize=12, fontweight="bold")
         ax.set_xlabel("TTFB (ms)", fontsize=10)
-        ax.set_ylabel("Mean TPOB (ms)", fontsize=10)
+        ax.set_ylabel("Max TPOB (ms)", fontsize=10)
         ax.grid(True, linestyle="--", alpha=0.35)
         ax.legend(fontsize=7, loc="upper right")
 
@@ -2134,7 +2134,7 @@ def plot_latency_metrics(
     fig, axes = plt.subplots(1, 2, figsize=(max(8, 2.8 * len(tasks) + 3), 4))
     for ax, key, title in [
         (axes[0], "ttfb_ms", "TTFB per request"),
-        (axes[1], "tpob_ms", "Mean TPOB per request"),
+        (axes[1], "tpob_ms", "Max TPOB per request"),
     ]:
         plot_tasks = [
             task for task in tasks if _values(latency_data[task]["request"], key)

@@ -5,11 +5,11 @@ MODEL_PATH="${MODEL_PATH:-inclusionAI/LLaDA2.0-mini}"
 BLOCK_SIZE="${BLOCK_SIZE:-32}"
 
 ################################
-TASKS=(${TASKS:-gsm8k}) #gsm8k humaneval math
-RATES_GSM8K="${RATES_GSM8K:-6 7 8 9}" # 5 6 7 8 9 10
+TASKS=(${TASKS:-math}) #gsm8k humaneval math
+RATES_GSM8K="${RATES_GSM8K:-6 7 8 9 10}" # 5 6 7 8 9 10
 RATES_HUMANEVAL="${RATES_HUMANEVAL:-10 12 14 16 18 20}"
-RATES_MATH="${RATES_MATH:-2 4 6}" #1 1.5 2 2.5 3
-SCHEDULERS=(${SCHEDULERS:-TTFB DECODE LST SOLA FCFS PREFILL}) # TTFB DECODE LST SOLA FCFS PREFILL
+RATES_MATH="${RATES_MATH:-6 7 8 9}" #6 성공
+SCHEDULERS=(${SCHEDULERS:-TTFB}) # TTFB DECODE LST SOLA FCFS PREFILL
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-10.0}"
 RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-20.0}"
 STRICT_PROB="${STRICT_PROB:-1}"
@@ -19,7 +19,7 @@ TP_SIZE="${TP_SIZE:-2}"
 FORWARD_TIME_S="${FORWARD_TIME_S:-0.020}"
 ################################
 
-OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_sched_comparison}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_sched_comparison_ver2}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
 WARMUP="${WARMUP:-16}"
 REQUEST_RATES=(${REQUEST_RATES:-})  # fallback when task has no per-task rates
@@ -27,15 +27,15 @@ NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 # NUM_THREADS / DLLM_ADMISSION_WINDOW: when unset, auto-detected from full dataset size per task.
 NUM_THREADS="${NUM_THREADS:-}"
 DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-}"
-PORT="${PORT:-30000}"
+PORT="${PORT:-30001}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 THRESHOLD="${THRESHOLD:-0.95}"
 PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"
 DECODE_FORWARD_TIME_S="${DECODE_FORWARD_TIME_S:-}"
-CONFIG_PATH="${CONFIG_PATH:-/tmp/dlm_algo_config_sched_cmp.yaml}"
-STEP_LOG_FILE="${STEP_LOG_FILE:-/tmp/dlm_step_stats.jsonl}"
-REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-/tmp/dlm_request_latency.jsonl}"
-BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-/tmp/dlm_batch_latency.jsonl}"
+CONFIG_PATH="${CONFIG_PATH:-/tmp/dlm_algo_config_sched_cmp_ver2.yaml}"
+STEP_LOG_FILE="${STEP_LOG_FILE:-/tmp/dlm_step_stats_ver2.jsonl}"
+REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-/tmp/dlm_request_latency_ver2.jsonl}"
+BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-/tmp/dlm_batch_latency_ver2.jsonl}"
 
 SERVER_PID=""
 
@@ -44,7 +44,7 @@ _task_dataset_size() {
     case "${1}" in
         gsm8k)     echo "1314" ;;
         humaneval) echo "164"  ;;
-        math)      echo "500"  ;; #5000
+        math)      echo "1000"  ;; #5000
         *)         echo "4000"  ;;
     esac
 }
