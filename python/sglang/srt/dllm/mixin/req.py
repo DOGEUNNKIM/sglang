@@ -116,16 +116,15 @@ class ReqDllmMixin:
             arrival = ts  # Fallback: DLLM admission time
 
         self.dllm_admission_time = arrival
-        if self.dllm_config is not None and (
-            self.dllm_config.use_lst() or self.dllm_config.use_sola()
-        ):
+        if self.dllm_config is not None:
             cfg = self.dllm_config
             self.dllm_slo_type = "strict" if random.random() < cfg.strict_prob else "release"
-            ttfb_slo = (
-                cfg.strict_ttfb_slo if self.dllm_slo_type == "strict" else cfg.release_ttfb_slo
-            )
-            if ttfb_slo is not None:
-                self.dllm_current_deadline = arrival + ttfb_slo
+            if cfg.use_lst() or cfg.use_sola():
+                ttfb_slo = (
+                    cfg.strict_ttfb_slo if self.dllm_slo_type == "strict" else cfg.release_ttfb_slo
+                )
+                if ttfb_slo is not None:
+                    self.dllm_current_deadline = arrival + ttfb_slo
 
     def compute_dllm_slack(self: Req, now: float) -> float:
         """Remaining slack = deadline - now - estimated remaining compute.

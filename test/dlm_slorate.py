@@ -158,10 +158,13 @@ def _count_metric(
     key: str,
     threshold_ms: float,
     missing: str,
+    slo_type_filter: Optional[str] = None,
 ) -> Tuple[int, int]:
     passed = 0
     total = 0
     for record in records:
+        if slo_type_filter is not None and record.get("slo_type") != slo_type_filter:
+            continue
         value = _metric_value(record, key)
         if value is None:
             if missing == "fail":
@@ -177,10 +180,13 @@ def _count_all(
     records: List[Dict[str, Any]],
     target: SloTarget,
     missing: str,
+    slo_type_filter: Optional[str] = None,
 ) -> Tuple[int, int]:
     passed = 0
     total = 0
     for record in records:
+        if slo_type_filter is not None and record.get("slo_type") != slo_type_filter:
+            continue
         ttfb = _metric_value(record, "ttfb_ms")
         tpob = _metric_value(record, "tpob_ms")
         if ttfb is None or tpob is None:
@@ -212,13 +218,15 @@ def compute_slo_rates(
         if task not in slos:
             continue
         task_slo = slos[task]
+        slo_types = {r.get("slo_type") for r in records if r.get("slo_type")}
+        mixed = "strict" in slo_types and "release" in slo_types
         counts = {
-            "strict_ttfb": _count_metric(records, "ttfb_ms", task_slo.strict.ttfb_ms, missing),
-            "strict_tpob": _count_metric(records, "tpob_ms", task_slo.strict.tpob_ms, missing),
-            "strict_all": _count_all(records, task_slo.strict, missing),
-            "relaxed_ttfb": _count_metric(records, "ttfb_ms", task_slo.relaxed.ttfb_ms, missing),
-            "relaxed_tpob": _count_metric(records, "tpob_ms", task_slo.relaxed.tpob_ms, missing),
-            "relaxed_all": _count_all(records, task_slo.relaxed, missing),
+            "strict_ttfb": _count_metric(records, "ttfb_ms", task_slo.strict.ttfb_ms, missing, slo_type_filter="strict" if mixed else None),
+            "strict_tpob": _count_metric(records, "tpob_ms", task_slo.strict.tpob_ms, missing, slo_type_filter="strict" if mixed else None),
+            "strict_all": _count_all(records, task_slo.strict, missing, slo_type_filter="strict" if mixed else None),
+            "relaxed_ttfb": _count_metric(records, "ttfb_ms", task_slo.relaxed.ttfb_ms, missing, slo_type_filter="release" if mixed else None),
+            "relaxed_tpob": _count_metric(records, "tpob_ms", task_slo.relaxed.tpob_ms, missing, slo_type_filter="release" if mixed else None),
+            "relaxed_all": _count_all(records, task_slo.relaxed, missing, slo_type_filter="release" if mixed else None),
         }
         for key, (passed, total) in counts.items():
             overall_counts[key][0] += passed

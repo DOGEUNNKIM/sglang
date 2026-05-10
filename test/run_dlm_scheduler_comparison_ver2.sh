@@ -8,7 +8,7 @@ BLOCK_SIZE="${BLOCK_SIZE:-32}"
 TASKS=(${TASKS:-math}) #gsm8k humaneval math
 RATES_GSM8K="${RATES_GSM8K:-6 7 8 9 10}" # 5 6 7 8 9 10
 RATES_HUMANEVAL="${RATES_HUMANEVAL:-10 12 14 16 18 20}"
-RATES_MATH="${RATES_MATH:-6 7 8 9 10}" #6 성공
+RATES_MATH="${RATES_MATH:-2 3 4 5}" #6 실패인데?
 SCHEDULERS=(${SCHEDULERS:-TTFB DECODE LST SOLA FCFS PREFILL}) # TTFB DECODE LST SOLA FCFS PREFILL
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-10.0}"
 RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-20.0}"
@@ -20,8 +20,8 @@ FORWARD_TIME_S="${FORWARD_TIME_S:-0.018}"
 ################################
 
 OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_sched_comparison_ver2}"
-MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
-WARMUP="${WARMUP:-16}"
+MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-32}"
+WARMUP="${WARMUP:-32}"
 REQUEST_RATES=(${REQUEST_RATES:-})  # fallback when task has no per-task rates
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 # NUM_THREADS / DLLM_ADMISSION_WINDOW: when unset, auto-detected from full dataset size per task.
@@ -36,6 +36,7 @@ CONFIG_PATH="${CONFIG_PATH:-/tmp/dlm_algo_config_sched_cmp_ver2.yaml}"
 STEP_LOG_FILE="${STEP_LOG_FILE:-/tmp/dlm_step_stats_ver2.jsonl}"
 REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-/tmp/dlm_request_latency_ver2.jsonl}"
 BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-/tmp/dlm_batch_latency_ver2.jsonl}"
+GPU_FREE_MEMORY_MIN_MB="${GPU_FREE_MEMORY_MIN_MB:-70000}"
 
 SERVER_PID=""
 
@@ -98,6 +99,36 @@ wait_server_ready() {
     done
 }
 
+wait_gpu_memory_released() {
+    local _prefix="${1}"
+    local _gpu_deadline=$(( SECONDS + 60 ))
+    until python3 -c "
+import subprocess, sys
+visible = '${CUDA_VISIBLE_DEVICES:-}'.strip()
+tp_size = int('${TP_SIZE}')
+min_free = int('${GPU_FREE_MEMORY_MIN_MB}')
+out = subprocess.check_output(['nvidia-smi','--query-gpu=index,memory.free','--format=csv,noheader,nounits']).decode()
+free_by_idx = {}
+for line in out.strip().splitlines():
+    idx, free = [x.strip() for x in line.split(',', 1)]
+    free_by_idx[idx] = int(free)
+if visible:
+    selected = [x.strip() for x in visible.split(',') if x.strip()]
+    selected = [x for x in selected if x in free_by_idx][:tp_size]
+else:
+    selected = sorted(free_by_idx, key=lambda x: int(x))[:tp_size]
+if len(selected) < tp_size:
+    selected = sorted(free_by_idx, key=lambda x: int(x))[:tp_size]
+sys.exit(0 if selected and all(free_by_idx[i] > min_free for i in selected) else 1)" 2>/dev/null; do
+        if (( SECONDS >= _gpu_deadline )); then
+            echo "[${_prefix}] WARNING: GPU memory not fully released after 60s, proceeding anyway" >&2
+            break
+        fi
+        echo "[${_prefix}] waiting for GPU memory release..."
+        sleep 3
+    done
+}
+
 stop_server() {
     if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" >/dev/null 2>&1; then
         echo "[server] shutting down pid=${SERVER_PID}"
@@ -121,19 +152,7 @@ stop_server() {
             kill -9 ${child_pids} >/dev/null 2>&1 || true
         fi
         # Wait for GPU memory to be released (CUDA holds memory until process fully exits)
-        local _gpu_deadline=$(( SECONDS + 60 ))
-        until python3 -c "
-import subprocess, sys
-out = subprocess.check_output(['nvidia-smi','--query-gpu=memory.free','--format=csv,noheader,nounits']).decode()
-free_mb = int(out.strip().split('\n')[0])
-sys.exit(0 if free_mb > 40000 else 1)" 2>/dev/null; do
-            if (( SECONDS >= _gpu_deadline )); then
-                echo "[server] WARNING: GPU memory not fully released after 60s, proceeding anyway" >&2
-                break
-            fi
-            echo "[server] waiting for GPU memory release..."
-            sleep 3
-        done
+        wait_gpu_memory_released "server"
     fi
     SERVER_PID=""
 }
@@ -166,19 +185,7 @@ _stale_pid=$(lsof -ti tcp:"${PORT}" 2>/dev/null || true)
 if [[ -n "${_stale_pid}" ]]; then
     echo "[startup] killing stale process(es) on port ${PORT}: ${_stale_pid}"
     kill -9 ${_stale_pid} 2>/dev/null || true
-    _gpu_deadline=$(( SECONDS + 60 ))
-    until python3 -c "
-import subprocess, sys
-out = subprocess.check_output(['nvidia-smi','--query-gpu=memory.free','--format=csv,noheader,nounits']).decode()
-free_mb = int(out.strip().split('\n')[0])
-sys.exit(0 if free_mb > 40000 else 1)" 2>/dev/null; do
-        if (( SECONDS >= _gpu_deadline )); then
-            echo "[startup] WARNING: GPU memory not fully released after 60s, proceeding anyway" >&2
-            break
-        fi
-        echo "[startup] waiting for GPU memory release..."
-        sleep 3
-    done
+    wait_gpu_memory_released "startup"
 fi
 
 declare -A IDEAL_TTFB_MS IDEAL_TPOB_MS
@@ -286,6 +293,7 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
             python "${BENCH_ARGS[@]}"
 
             stop_server
+            rm -f "${STEP_LOG_FILE}" "${REQUEST_LATENCY_LOG_FILE}" "${BATCH_LATENCY_LOG_FILE}"
         }  # TASK block
         done  # RATE
     done  # TASK
@@ -391,16 +399,21 @@ task_rate_map = {
 
 model_tag = '${MODEL_PATH}'.replace('/', '_')
 
-def _read_bench_p99(out_dir, task):
+def _read_bench_metrics(out_dir, task):
     p = Path(out_dir) / f'{task}_{model_tag}.json'
     if not p.exists():
-        return None, None
+        return None, None, None, None
     try:
         d = json.loads(p.read_text())
         ls = d.get('latency_stats', d)
-        return ls.get('p99_ttfb_ms'), ls.get('p99_tpob_ms')
+        return (
+            d.get('score'),
+            d.get('score:std'),
+            ls.get('p99_ttfb_ms'),
+            ls.get('p99_tpob_ms'),
+        )
     except Exception:
-        return None, None
+        return None, None, None, None
 
 summary = {}
 for sched in schedulers:
@@ -417,8 +430,10 @@ for sched in schedulers:
             if task not in data:
                 continue
             rates_d = data[task].get('rates', {})
-            p99_ttfb, p99_tpob = _read_bench_p99(out_dir, task)
+            score, score_std, p99_ttfb, p99_tpob = _read_bench_metrics(out_dir, task)
             summary[sched][rate][task] = {
+                'score':        score,
+                'score_std':    score_std,
                 'strict_ttfb':  rates_d.get('strict_ttfb'),
                 'strict_tpob':  rates_d.get('strict_tpob'),
                 'strict_all':   rates_d.get('strict_all'),
@@ -433,7 +448,7 @@ Path('${SUMMARY_PATH}').write_text(json.dumps(summary, indent=2))
 print(f'[summary] saved → ${SUMMARY_PATH}')
 
 # Print table
-header = f\"{'Scheduler':<10} {'Task':<12} {'Rate':>6} {'Str-TTFB':>10} {'Str-TPOB':>10} {'Str-All':>9} {'Rel-TTFB':>10} {'Rel-TPOB':>10} {'Rel-All':>9} {'P99-TTFB':>10} {'P99-TPOB':>10}\"
+header = f\"{'Scheduler':<10} {'Task':<12} {'Rate':>6} {'Acc':>8} {'Str-TTFB':>10} {'Str-TPOB':>10} {'Str-All':>9} {'Rel-TTFB':>10} {'Rel-TPOB':>10} {'Rel-All':>9} {'P99-TTFB':>10} {'P99-TPOB':>10}\"
 print()
 print(header)
 print('-' * len(header))
@@ -445,7 +460,7 @@ for sched in schedulers:
             r = summary.get(sched, {}).get(rate, {}).get(task)
             if r is None:
                 continue
-            print(f'{sched:<10} {task:<12} {rate:>6} {fmt(r[\"strict_ttfb\"]):>10} {fmt(r[\"strict_tpob\"]):>10} {fmt(r[\"strict_all\"]):>9} {fmt(r[\"relaxed_ttfb\"]):>10} {fmt(r[\"relaxed_tpob\"]):>10} {fmt(r[\"relaxed_all\"]):>9} {fms(r[\"p99_ttfb_ms\"]):>10} {fms(r[\"p99_tpob_ms\"]):>10}')
+            print(f'{sched:<10} {task:<12} {rate:>6} {fmt(r[\"score\"]):>8} {fmt(r[\"strict_ttfb\"]):>10} {fmt(r[\"strict_tpob\"]):>10} {fmt(r[\"strict_all\"]):>9} {fmt(r[\"relaxed_ttfb\"]):>10} {fmt(r[\"relaxed_tpob\"]):>10} {fmt(r[\"relaxed_all\"]):>9} {fms(r[\"p99_ttfb_ms\"]):>10} {fms(r[\"p99_tpob_ms\"]):>10}')
 "
 
 echo

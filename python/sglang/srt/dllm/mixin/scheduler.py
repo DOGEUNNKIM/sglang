@@ -657,10 +657,9 @@ class SchedulerDllmMixin:
 
         if num_requests_to_add > 0:
             requests_to_add = self.waiting_queue[:num_requests_to_add]
-            if self.dllm_config.use_unified_traversal():
-                now = time.perf_counter()
-                for req in requests_to_add:
-                    req.set_dllm_admission_time(now)
+            now = time.perf_counter()
+            for req in requests_to_add:
+                req.set_dllm_admission_time(now)
             self.dllm_manager.add_waiting_reqs(requests_to_add)
             self.waiting_queue = self.waiting_queue[num_requests_to_add:]
 

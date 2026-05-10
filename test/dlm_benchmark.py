@@ -355,7 +355,7 @@ def run_warmup(base_url: str, model: str, num_requests: int = 4) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 TASK_API = {"gsm8k": "completion", "humaneval": "chat", "math": "chat"}
-TASK_MAX_TOKENS = {"gsm8k": 512, "humaneval": 512, "math": 1024}
+TASK_MAX_TOKENS = {"gsm8k": 512, "humaneval": 512, "math": 512}
 
 
 def _make_sampler(task: str, base_url: str, model: str,

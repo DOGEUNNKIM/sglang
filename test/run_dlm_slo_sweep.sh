@@ -7,17 +7,17 @@ BLOCK_SIZE="${BLOCK_SIZE:-32}" #4
 WARMUP="${WARMUP:-16}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 REQUEST_RATES=(${REQUEST_RATES:-8}) #0.5 1 1.5
-TASKS=(${TASKS:-math}) ##### TASK humaneval math gsm8k
-NUM_EXAMPLES="${NUM_EXAMPLES:-1000}"
+TASKS=(${TASKS:-humaneval math gsm8k}) ##### TASK humaneval math gsm8k
+NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
 PORT="${PORT:-30000}"
 #DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-100}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 THRESHOLD="${THRESHOLD:-0.95}"
-NUM_THREADS_SWEEP=(${NUM_THREADS_SWEEP:-1000})  # sweep values 50 100 150 200
+NUM_THREADS_SWEEP=(${NUM_THREADS_SWEEP:-200})  # sweep values 50 100 150 200
 SCHEDULER="${SCHEDULER:-LST}"               # LST | PREFILL | DECODE | FCFS | SOLA | TTFB
-STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-5.0}"    # strict SLO = multiplier × ideal latency
-RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-25.0}" # release SLO = multiplier × ideal latency
+STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-10.0}"    # strict SLO = multiplier × ideal latency
+RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-20.0}" # release SLO = multiplier × ideal latency
 STRICT_PROB="${STRICT_PROB:-1}"               # fraction of requests assigned strict SLO
 FORWARD_TIME_S="${FORWARD_TIME_S:-0.030}"          # shared fallback (s)
 PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"  # override prefill fwd time (s)
