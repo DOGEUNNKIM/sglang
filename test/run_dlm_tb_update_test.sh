@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_PATH="${MODEL_PATH:-inclusionAI/LLaDA2.0-mini}"
+###### model config ######
+BLOCK_SIZE="${BLOCK_SIZE:-16}" #16 32
+MODEL_PATH="${MODEL_PATH:-JetLM/SDAR-8B-Chat}" #JetLM/SDAR-8B-Chat inclusionAI/LLaDA2.0-mini
+######
+
 OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_results}"
-BLOCK_SIZE="${BLOCK_SIZE:-32}" #4
 WARMUP="${WARMUP:-16}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 REQUEST_RATES=(${REQUEST_RATES:-100})
-TASKS=(${TASKS:-ruler_8k}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
-NUM_EXAMPLES="${NUM_EXAMPLES:-100}"
+TASKS=(${TASKS:-humaneval gsm8k}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
+NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
 PORT="${PORT:-30000}"
 #DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-100}"
@@ -37,8 +40,8 @@ SERVER_PID=""
 _ideal_ttfb_ms() {
     case "${1}" in
         gsm8k)     echo "417.2" ;;
-        humaneval) echo "312.9" ;;
-        math)      echo "404.5" ;;
+        humaneval) echo "417.2" ;;
+        math)      echo "417.2" ;;
         gpqa)      echo "417.2" ;;
         mmlu)      echo "417.2" ;;
         ruler_4k)  echo "417.2" ;;
@@ -52,8 +55,8 @@ _ideal_ttfb_ms() {
 _ideal_tpob_ms() {
     case "${1}" in
         gsm8k)     echo "348.5" ;;
-        humaneval) echo "158.8" ;;
-        math)      echo "436.5" ;;
+        humaneval) echo "348.5" ;;
+        math)      echo "348.5" ;;
         gpqa)      echo "348.5" ;;
         mmlu)      echo "348.5" ;;
         ruler_4k)  echo "348.5" ;;
@@ -242,6 +245,8 @@ for RATE in "${REQUEST_RATES[@]}"; do
         PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.6 \
         python "${BENCH_ARGS[@]}"
 
+        [[ -f "${STEP_LOG_FILE}" ]] && cp "${STEP_LOG_FILE}" "${OUT_DIR}/step_stats_${TASK}.jsonl"
+
         stop_server
     done
     done  # THREADS
@@ -285,6 +290,28 @@ for RATE in "${REQUEST_RATES[@]}"; do
             --log-dir "${OUT_DIR}" \
             --tasks "${TASKS[@]}" \
             --output "${OUT_DIR}/bellman_convergence.png"
+    done
+done
+
+echo
+echo "============================================================"
+echo "Step distribution plots"
+echo "============================================================"
+
+MODEL_SLUG="${MODEL_PATH//\//_}"
+
+for RATE in "${REQUEST_RATES[@]}"; do
+    for THREADS in "${NUM_THREADS_SWEEP[@]}"; do
+        OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}/threads_${THREADS}"
+
+        echo
+        echo "Step distribution: request_rate=${RATE}, threads=${THREADS}"
+        echo "------------------------------------------------------------"
+
+        python test/plot_step_dist.py \
+            --log-dir "${OUT_DIR}" \
+            --tasks "${TASKS[@]}" \
+            --output "${OUT_DIR}/step_dist_${MODEL_SLUG}.png"
     done
 done
 

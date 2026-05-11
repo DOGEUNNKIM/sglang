@@ -5,17 +5,17 @@ MODEL_PATH="${MODEL_PATH:-JetLM/SDAR-8B-Chat}"
 BLOCK_SIZE="${BLOCK_SIZE:-16}"
 
 ################################
-TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
-RATES_GSM8K="${RATES_GSM8K:-6 7 8 9 10}"
-RATES_HUMANEVAL="${RATES_HUMANEVAL:-10 12 14 16 18 20}"
-RATES_MATH="${RATES_MATH:-1 1.2 1.4 1.6 1.8 2}"
-RATES_GPQA="${RATES_GPQA:-5 6 7 8 9}"
+TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu haregpt}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
+RATES_GSM8K="${RATES_GSM8K:-5 6 7 8 9}"
 RATES_MMLU="${RATES_MMLU:-5 6 7 8 9}"
-RATES_LONGBENCH_V2="${RATES_LONGBENCH_V2:-1 1.5 2 2.5 3}"
+RATES_HUMANEVAL="${RATES_HUMANEVAL:-12 14 16 20 24}" #10 12 14 16 18
+RATES_MATH="${RATES_MATH:-1 2 3 4 5}"
+RATES_GPQA="${RATES_GPQA:-1 2 3 4 5}"
+RATES_SHAREGPT="${RATES_SHAREGPT:-3 4 5 6 7 8 9}"
 RATES_RULER_4K="${RATES_RULER_4K:-2 3 4 5 6}"
-RATES_RULER_8K="${RATES_RULER_8K:-1 1.5 2 2.5 3}"
+RATES_RULER_8K="${RATES_RULER_8K:-0.5 0.75 1 1.25 1.5}"
 RATES_RULER_16K="${RATES_RULER_16K:-0.5 0.75 1 1.25 1.5}"
-RATES_SHAREGPT="${RATES_SHAREGPT:-1 1.5 2 2.5 3}"
+RATES_LONGBENCH_V2="${RATES_LONGBENCH_V2:-1 1.5 2 2.5 3}"
 # Per-task example cap (empty = full dataset). Override via env, e.g. NUM_EXAMPLES_MATH=100.
 NUM_EXAMPLES_GSM8K="${NUM_EXAMPLES_GSM8K:-}"
 NUM_EXAMPLES_HUMANEVAL="${NUM_EXAMPLES_HUMANEVAL:-}"
@@ -35,9 +35,9 @@ TP_SIZE="${TP_SIZE:-2}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-32}"
 WARMUP="${WARMUP:-32}"
 ############ 아직 Forward 시간은 획정 아님
-#TP가 1이면 Forward 0.028
-#TP가 2이면 Forward 0.018
-FORWARD_TIME_S="${FORWARD_TIME_S:-0.035}"
+#TP가 1이면 Forward 0.030
+#TP가 2이면 Forward 0.022
+FORWARD_TIME_S="${FORWARD_TIME_S:-0.022}"
 ################################
 
 OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_sched_comparison_SDAR}"
