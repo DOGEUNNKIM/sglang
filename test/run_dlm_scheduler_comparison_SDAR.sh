@@ -5,7 +5,7 @@ MODEL_PATH="${MODEL_PATH:-JetLM/SDAR-8B-Chat}"
 BLOCK_SIZE="${BLOCK_SIZE:-16}"
 
 ################################
-TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu haregpt}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
+TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu sharegpt}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
 RATES_GSM8K="${RATES_GSM8K:-5 6 7 8 9}"
 RATES_MMLU="${RATES_MMLU:-5 6 7 8 9}"
 RATES_HUMANEVAL="${RATES_HUMANEVAL:-12 14 16 20 24}" #10 12 14 16 18

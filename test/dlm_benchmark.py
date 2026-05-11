@@ -461,16 +461,17 @@ TASK_API = {
     "sharegpt": "chat",
 }
 TASK_MAX_TOKENS = {
-    "math": 2048,
-    "gpqa": 2048,
+    "math": 1024,
+    "gpqa": 1024,
     "gsm8k": 512,
     "humaneval": 512,
     "mmlu": 512,
     "longbench_v2": 512,
+    "sharegpt": 512,
     "ruler_4k": 128,
     "ruler_8k": 128,
     "ruler_16k": 128,
-    "sharegpt": 512,
+    "longbench_v2": 128,
 }
 
 GPQA_DEFAULT_URL = "https://openaipublic.blob.core.windows.net/simple-evals/gpqa_diamond.csv"
