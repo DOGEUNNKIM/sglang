@@ -78,6 +78,56 @@ if TYPE_CHECKING:
 _is_npu = is_npu()
 
 
+def _make_dllm_positions(
+    batch,
+    block_size: int,
+    num_tokens: int,
+    positions_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Build DLM positions with the same token count as input_ids."""
+    block_offsets = list(batch.dllm_block_offsets or [])
+    extend_seq_lens = (
+        list(batch.extend_seq_lens)
+        if isinstance(batch.extend_seq_lens, list)
+        else None
+    )
+    extend_prefix_lens = (
+        list(batch.extend_prefix_lens)
+        if isinstance(batch.extend_prefix_lens, list)
+        else None
+    )
+
+    if extend_seq_lens is not None:
+        req_count = len(extend_seq_lens)
+    else:
+        req_count = len(block_offsets)
+
+    positions: List[int] = []
+    for i in range(req_count):
+        extend_len = (
+            int(extend_seq_lens[i]) if extend_seq_lens is not None else block_size
+        )
+        if extend_len <= 0:
+            continue
+
+        if i < len(block_offsets) and block_offsets[i] is not None:
+            start = int(block_offsets[i])
+        elif extend_prefix_lens is not None and i < len(extend_prefix_lens):
+            start = int(extend_prefix_lens[i])
+        else:
+            start = 0
+
+        positions.extend(range(start, start + extend_len))
+
+    if len(positions) > num_tokens:
+        positions = positions[:num_tokens]
+    elif len(positions) < num_tokens:
+        start = positions[-1] + 1 if positions else 0
+        positions.extend(range(start, start + num_tokens - len(positions)))
+
+    return torch.tensor(positions, dtype=positions_dtype)
+
+
 class ForwardMode(IntEnum):
     # Extend a sequence. The KV cache of the beginning part of the sequence is already computed (e.g., system prompt).
     # It is also called "prefill" in common terminology.
@@ -545,13 +595,11 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             block_size = batch.dllm_config.block_size
             # Use int64 for AMD rotary embedding kernel compatibility
             positions_dtype = torch.int64 if is_hip() or _is_npu else torch.int32
-            ret.positions = torch.tensor(
-                [
-                    i
-                    for block_offset in batch.dllm_block_offsets
-                    for i in range(block_offset, block_offset + block_size)
-                ],
-                dtype=positions_dtype,
+            ret.positions = _make_dllm_positions(
+                batch,
+                block_size,
+                num_tokens,
+                positions_dtype,
             ).to(device, non_blocking=True)
         elif (
             ret.spec_info is not None

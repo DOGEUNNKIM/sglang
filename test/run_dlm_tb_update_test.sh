@@ -6,15 +6,15 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_results}"
 BLOCK_SIZE="${BLOCK_SIZE:-32}" #4
 WARMUP="${WARMUP:-16}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
-REQUEST_RATES=(${REQUEST_RATES:-200}) #0.5 1 1.5
+REQUEST_RATES=(${REQUEST_RATES:-100})
 TASKS=(${TASKS:-ruler_8k}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
-NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
+NUM_EXAMPLES="${NUM_EXAMPLES:-100}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
 PORT="${PORT:-30000}"
 #DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-100}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 THRESHOLD="${THRESHOLD:-0.95}"
-NUM_THREADS_SWEEP=(${NUM_THREADS_SWEEP:-200})  # sweep values 50 100 150 200
+NUM_THREADS_SWEEP=(${NUM_THREADS_SWEEP:-100})  # sweep values 50 100 150 200
 SCHEDULER="${SCHEDULER:-LST}"               # LST | PREFILL | DECODE | FCFS | SOLA | TTFB
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-10.0}"    # strict SLO = multiplier × ideal latency
 RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-20.0}" # release SLO = multiplier × ideal latency
@@ -203,10 +203,14 @@ for RATE in "${REQUEST_RATES[@]}"; do
             --attention-backend flashinfer \
             --max-running-requests "${MAX_RUNNING_REQUESTS}" \
             --tp-size "${TP_SIZE}" \
-            --mem-fraction-static 0.85 \
+            --mem-fraction-static 0.95 \
             --cuda-graph-max-bs "${MAX_RUNNING_REQUESTS}" \
             --disable-cuda-graph-padding \
             >> /tmp/dlm_results/run_dlm_slo_server_log.txt 2>&1 &
+            ###############################
+            # if long context ruler_4k ruler_8k and ruler_16k
+            #--disable-cuda-graph \
+            ###############################
         SERVER_PID=$!
 
         echo "[server] pid=${SERVER_PID}, waiting for ${BASE_URL}/health"
