@@ -42,32 +42,38 @@ class DllmConfig:
 
         self.bellman_alpha0: float = max(
             0.0,
-            float(algorithm_config.get("bellman_alpha0", 0.2)),
+            float(algorithm_config.get("bellman_alpha0", 0.1)),
         )
         self.bellman_alpha_min: float = min(
             1.0,
             max(0.0, float(algorithm_config.get("bellman_alpha_min", 0.03))),
         )
-        # Pre-computed fixed alpha — avoids recomputing min/max on every update.
-        self.bellman_alpha: float = min(1.0, max(self.bellman_alpha_min, self.bellman_alpha0))
+        self.bellman_alpha: float = max(self.bellman_alpha_min, self.bellman_alpha0)
 
-        # Global Bellman/TD table for remaining decode forwards.
-        # V[r] estimates how many unmask forwards are needed to finish a block
-        # when r masked tokens remain.  Starts from conservative prior V[r] = r,
-        # then receives TD updates:
-        #   V[before] <- (1 - alpha) * V[before] + alpha * (1 + V[after])
-        # with alpha = max(alpha_min, alpha0) (fixed).
-        # Initialize V[r] = r / 2 as a neutral prior: on average half the masks
-        # are resolved per forward, independent of task or model.
+        # V[r] = estimated forward passes to finish a block with r masks remaining.
+        # Initialized to r+1; updated online via adaptive stochastic median.
         self.decode_forwards_by_remaining: list[float] = [
-            float(remaining) / 2.0
+            float(remaining + 1)
             for remaining in range(self.block_size + 1)
         ]
+        self._update_counts: list[int] = [0] * (self.block_size + 1)
 
-        # Single safety multiplier applied to all decode forward estimates.
         self.decode_safety_factor: float = float(
             algorithm_config.get("decode_safety_factor", 1.0)
         )
+
+        self.bellman_log_file: str | None = algorithm_config.get("bellman_log_file") or None
+        self.bellman_block_count: int = 0
+
+        if self.bellman_log_file:
+            import json, time as _time
+            with open(self.bellman_log_file, "w") as _bf:
+                _bf.write(json.dumps({
+                    "block": 0,
+                    "time": _time.perf_counter(),
+                    "table": list(self.decode_forwards_by_remaining),
+                    "traj": [],
+                }) + "\n")
 
     def _clamp_remaining_masks(self, remaining_masked_tokens: int | None) -> int:
         if remaining_masked_tokens is None:
@@ -76,27 +82,22 @@ class DllmConfig:
 
     def update_decode_forwards_estimate(
         self,
-        remaining_masked_before: int | None,
-        remaining_masked_after: int | None,
+        remaining: int | None,
+        observed_steps: float,
     ) -> None:
-        """TD-update V[remaining] from one observed unmask forward transition."""
-        before = self._clamp_remaining_masks(remaining_masked_before)
-        if before <= 0:
+        """Stochastic median update: step = max(0.1, 2/sqrt(n)) per r, skips r=0."""
+        r = self._clamp_remaining_masks(remaining)
+        if r <= 0:
             return
-        after = self._clamp_remaining_masks(remaining_masked_after)
-        target_forwards = 1.0 + self.decode_forwards_by_remaining[after]
-        current_forwards = self.decode_forwards_by_remaining[before]
-        alpha = self.bellman_alpha
-        self.decode_forwards_by_remaining[before] = (
-            (1.0 - alpha) * current_forwards + alpha * target_forwards
-        )
+        self._update_counts[r] += 1
+        step = max(0.1, 2.0 / math.sqrt(self._update_counts[r]))
+        if self.decode_forwards_by_remaining[r] > observed_steps:
+            self.decode_forwards_by_remaining[r] -= step
+        else:
+            self.decode_forwards_by_remaining[r] += step
 
     def estimate_decode_forwards(self, remaining_masked_tokens: int) -> int:
-        """Estimate forwards needed to finish the active decode block.
-
-        Uses the global Bellman/TD table V[remaining].  Before any observation,
-        V[r] is initialized as r to avoid cold-start under-estimation.
-        """
+        """Return ceil(safety_factor * V[remaining]), minimum 1."""
         remaining = self._clamp_remaining_masks(remaining_masked_tokens)
         if remaining <= 0:
             return 0
@@ -172,7 +173,6 @@ class DllmConfig:
             with open(server_args.dllm_algorithm_config, "r") as f:
                 algorithm_config = yaml.safe_load(f) or {}
 
-            # Parse common algorithm configurations
             block_size = algorithm_config.get("block_size", block_size)
 
         admission_window = int(

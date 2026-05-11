@@ -6,8 +6,8 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_results}"
 BLOCK_SIZE="${BLOCK_SIZE:-32}" #4
 WARMUP="${WARMUP:-16}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
-REQUEST_RATES=(${REQUEST_RATES:-8}) #0.5 1 1.5
-TASKS=(${TASKS:-humaneval math gsm8k}) ##### TASK humaneval math gsm8k
+REQUEST_RATES=(${REQUEST_RATES:-200}) #0.5 1 1.5
+TASKS=(${TASKS:-math}) ##### TASK humaneval math gsm8k
 NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
 PORT="${PORT:-30000}"
@@ -91,6 +91,7 @@ EOF
     [[ -n "${_release_tpob}" ]]          && echo "release_tpob_slo: ${_release_tpob}"                 >> "${CONFIG_PATH}"
     [[ -n "${PREFILL_FORWARD_TIME_S}" ]] && echo "prefill_forward_time_s: ${PREFILL_FORWARD_TIME_S}"   >> "${CONFIG_PATH}"
     [[ -n "${DECODE_FORWARD_TIME_S}" ]]  && echo "decode_forward_time_s: ${DECODE_FORWARD_TIME_S}"     >> "${CONFIG_PATH}"
+    [[ -n "${_bellman_log_file:-}" ]]    && echo "bellman_log_file: ${_bellman_log_file}"               >> "${CONFIG_PATH}"
     return 0
 }
 
@@ -175,6 +176,7 @@ for RATE in "${REQUEST_RATES[@]}"; do
             *)      _scheduler_mode="prefill" ;;  # PREFILL, DECODE, or unrecognised
         esac
 
+        _bellman_log_file="${OUT_DIR}/bellman_log_${TASK}.jsonl"
         write_dllm_config "${_strict_ttfb:-}" "${_strict_tpob:-}" "${_release_ttfb:-}" "${_release_tpob:-}" "${_scheduler_mode}"
         echo "===== request_rate=${RATE} task=${TASK} =====" >> /tmp/dlm_results/run_dlm_slo_server_log.txt
 
@@ -242,6 +244,26 @@ for RATE in "${REQUEST_RATES[@]}"; do
             --latency-dir "${OUT_DIR}" \
             --tasks "${TASKS[@]}" \
             --output-json "${SLO_PATH}"
+    done
+done
+
+echo
+echo "============================================================"
+echo "Bellman convergence plots"
+echo "============================================================"
+
+for RATE in "${REQUEST_RATES[@]}"; do
+    for THREADS in "${NUM_THREADS_SWEEP[@]}"; do
+        OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}/threads_${THREADS}"
+
+        echo
+        echo "Bellman convergence: request_rate=${RATE}, threads=${THREADS}"
+        echo "------------------------------------------------------------"
+
+        python test/plot_bellman_convergence.py \
+            --log-dir "${OUT_DIR}" \
+            --tasks "${TASKS[@]}" \
+            --output "${OUT_DIR}/bellman_convergence.png"
     done
 done
 

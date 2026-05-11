@@ -8,7 +8,9 @@ BLOCK_SIZE="${BLOCK_SIZE:-32}"
 TASKS=(${TASKS:-math}) #gsm8k humaneval math
 RATES_GSM8K="${RATES_GSM8K:-6 7 8 9 10}" # 5 6 7 8 9 10
 RATES_HUMANEVAL="${RATES_HUMANEVAL:-10 12 14 16 18 20}"
-RATES_MATH="${RATES_MATH:-2 3 4 5}" #6 실패인데?
+RATES_MATH="${RATES_MATH:-1 1.2 1.4 1.6 1.8 2}" 
+# batch 16이면 1까지는 delay 없음, 2 까지는 thread 영향 안받음 , 3이상은 안됨
+# batch 32이면 2 까지는 delay 없음
 SCHEDULERS=(${SCHEDULERS:-TTFB DECODE LST SOLA FCFS PREFILL}) # TTFB DECODE LST SOLA FCFS PREFILL
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-10.0}"
 RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-20.0}"
@@ -16,12 +18,12 @@ STRICT_PROB="${STRICT_PROB:-1}"
 #TP가 1이면 Forward 0.028
 #TP가 2이면 Forward 0.018
 TP_SIZE="${TP_SIZE:-2}" 
+MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
+WARMUP="${WARMUP:-16}"
 FORWARD_TIME_S="${FORWARD_TIME_S:-0.018}"
 ################################
 
 OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_sched_comparison_ver2}"
-MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-32}"
-WARMUP="${WARMUP:-32}"
 REQUEST_RATES=(${REQUEST_RATES:-})  # fallback when task has no per-task rates
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 # NUM_THREADS / DLLM_ADMISSION_WINDOW: when unset, auto-detected from full dataset size per task.

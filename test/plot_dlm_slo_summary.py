@@ -460,6 +460,35 @@ def _read_request_jsonl(path: Path) -> List[Dict]:
     return records
 
 
+def _lighten_color(hex_color: str, amount: float = 0.55) -> str:
+    """Blend hex_color toward white by `amount` (0=original, 1=white)."""
+    hex_color = hex_color.lstrip("#")
+    r, g, b = (int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    r = int(r + (255 - r) * amount)
+    g = int(g + (255 - g) * amount)
+    b = int(b + (255 - b) * amount)
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
+def _split_by_slo(
+    xs: List, ys: List, slo: Optional[Dict]
+) -> Tuple[List, List, List, List]:
+    """Split (x, y) lists into (met_x, met_y, viol_x, viol_y) using SLO thresholds."""
+    if not slo:
+        return xs, ys, [], []
+    ttfb_lim = slo.get("ttfb_ms")
+    tpob_lim = slo.get("tpob_ms")
+    met_x, met_y, viol_x, viol_y = [], [], [], []
+    for x, y in zip(xs, ys):
+        ttfb_ok = (ttfb_lim is None) or (x is not None and x <= ttfb_lim)
+        tpob_ok = (tpob_lim is None) or (y is None) or (y <= tpob_lim)
+        if ttfb_ok and tpob_ok:
+            met_x.append(x); met_y.append(y)
+        else:
+            viol_x.append(x); viol_y.append(y)
+    return met_x, met_y, viol_x, viol_y
+
+
 def _split_records(records: List[Dict]) -> Tuple[List, List, List, List, List, List]:
     strict_x, strict_y, release_x, release_y, other_x, other_y = [], [], [], [], [], []
     for r in records:
@@ -533,11 +562,19 @@ def plot_scatter_ttfb_tpob(
     for col, (label, sched_color, sx, sy, rx, ry, ox, oy) in enumerate(sched_split):
         ax = axes[0][col]
         if sx:
-            ax.scatter(sx, sy, s=8, alpha=0.45, color="#C44E52", label="strict", rasterized=True)
+            s_met_x, s_met_y, s_viol_x, s_viol_y = _split_by_slo(sx, sy, slo_strict)
+            if s_met_x:
+                ax.scatter(s_met_x, s_met_y, s=8, alpha=0.6, color=sched_color, label="strict (met)", rasterized=True)
+            if s_viol_x:
+                ax.scatter(s_viol_x, s_viol_y, s=8, alpha=0.6, color=_lighten_color(sched_color), label="strict (violated)", rasterized=True)
         if rx:
-            ax.scatter(rx, ry, s=8, alpha=0.45, color="#4472C4", label="release", rasterized=True)
+            r_met_x, r_met_y, r_viol_x, r_viol_y = _split_by_slo(rx, ry, slo_relaxed)
+            if r_met_x:
+                ax.scatter(r_met_x, r_met_y, s=8, alpha=0.6, color=sched_color, label="release (met)", rasterized=True)
+            if r_viol_x:
+                ax.scatter(r_viol_x, r_viol_y, s=8, alpha=0.6, color=_lighten_color(sched_color), label="release (violated)", rasterized=True)
         if ox:
-            ax.scatter(ox, oy, s=8, alpha=0.45, color=sched_color, label="other", rasterized=True)
+            ax.scatter(ox, oy, s=8, alpha=0.6, color=sched_color, label="other", rasterized=True)
         _draw_slo_lines(ax, bool(sx), bool(rx), bool(ox), slo_strict, slo_relaxed)
         ax.set_xlabel("TTFB (ms)", fontsize=10)
         ax.set_title(label, fontsize=11, fontweight="bold")
@@ -562,12 +599,18 @@ def plot_scatter_ttfb_tpob(
     if not single_type:
         return
 
+    slo_for_combined = slo_strict if has_any_strict else slo_relaxed
     fig2, ax2 = plt.subplots(figsize=(6.0, 5.0))
     for label, sched_color, sx, sy, rx, ry, ox, oy in sched_split:
         xs = sx if sx else (rx if rx else ox)
         ys = sy if sy else (ry if ry else oy)
-        if xs:
-            ax2.scatter(xs, ys, s=8, alpha=0.45, color=sched_color, label=label, rasterized=True)
+        if not xs:
+            continue
+        met_x, met_y, viol_x, viol_y = _split_by_slo(xs, ys, slo_for_combined)
+        if met_x:
+            ax2.scatter(met_x, met_y, s=5, alpha=0.6, color=sched_color, label=label, rasterized=True)
+        if viol_x:
+            ax2.scatter(viol_x, viol_y, s=5, alpha=0.6, color=_lighten_color(sched_color), label=f"{label} (violated)", rasterized=True)
     has_any_other = any(s[6] for s in sched_split)
     _draw_slo_lines(ax2, has_any_strict, has_any_release, has_any_other, slo_strict, slo_relaxed)
     ax2.set_xlabel("TTFB (ms)", fontsize=11)

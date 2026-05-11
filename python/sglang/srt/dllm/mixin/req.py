@@ -43,6 +43,7 @@ class ReqDllmMixin:
         self.dllm_active_block_steps = 0
         self.dllm_pending_kv_save = False
         self.dllm_active_remaining_masks: Optional[int] = None
+        self.dllm_block_mask_trajectory: list[int] = []  # remaining-mask counts per decode forward in current block
         # cumulative decode forward steps across all completed blocks
         self.dllm_total_block_steps: int = 0
         # decode delay: time from block completion → next block first enters a batch
@@ -248,6 +249,7 @@ class ReqDllmMixin:
         self.dllm_active_block_steps = 0
         self.dllm_pending_kv_save = False
         self.dllm_active_remaining_masks = None
+        self.dllm_block_mask_trajectory = []
 
     def determine_dllm_phase(self: Req):
         if self.has_dllm_active_block():

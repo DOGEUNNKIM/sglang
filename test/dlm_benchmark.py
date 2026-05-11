@@ -355,7 +355,7 @@ def run_warmup(base_url: str, model: str, num_requests: int = 4) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 TASK_API = {"gsm8k": "completion", "humaneval": "chat", "math": "chat"}
-TASK_MAX_TOKENS = {"gsm8k": 512, "humaneval": 512, "math": 512}
+TASK_MAX_TOKENS = {"gsm8k": 512, "humaneval": 512, "math": 8192}
 
 
 def _make_sampler(task: str, base_url: str, model: str,
@@ -1534,7 +1534,7 @@ def plot_tpob_per_request(
 
     for ax, task in zip(axes, tasks):
         records = latency_data[task].get("request", [])
-        tpob_vals = [r["tpob_ms"] for r in records if "tpob_ms" in r]
+        tpob_vals = [r["tpob_ms"] for r in records if r.get("tpob_ms") is not None]
         if not tpob_vals:
             ax.text(0.5, 0.5, "No data", ha="center", va="center",
                     transform=ax.transAxes)

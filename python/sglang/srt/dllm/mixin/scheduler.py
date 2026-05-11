@@ -188,15 +188,27 @@ class SchedulerDllmMixin:
                 if final_steps > 0:
                     req.dllm_total_block_steps += final_steps
                     req.dllm_block_steps_list.append(final_steps)
-                    # Bellman TD update at block completion (no GPU sync needed).
-                    # Multi-step target: starting from block_size masks, observed final_steps.
                     cfg = self.dllm_config
-                    r = cfg.block_size
-                    alpha = cfg.bellman_alpha
-                    cfg.decode_forwards_by_remaining[r] = (
-                        (1.0 - alpha) * cfg.decode_forwards_by_remaining[r]
-                        + alpha * float(final_steps)
-                    )
+                    # Full trajectory Bellman TD update: update V[r] for every
+                    # (r_before, r_after) transition observed during this block.
+                    traj = req.dllm_block_mask_trajectory
+                    n_traj = len(traj)
+                    for i, r in enumerate(traj):
+                        cfg.update_decode_forwards_estimate(r, float(n_traj - i))
+                    cfg.bellman_block_count += 1
+                    if cfg.bellman_log_file:
+                        with open(cfg.bellman_log_file, "a") as _bf:
+                            _bf.write(
+                                json.dumps(
+                                    {
+                                        "block": cfg.bellman_block_count,
+                                        "time": time.perf_counter(),
+                                        "table": list(cfg.decode_forwards_by_remaining),
+                                        "traj": traj,
+                                    }
+                                )
+                                + "\n"
+                            )
 
                 req.clear_dllm_active_block()
                 has_output = True
@@ -424,8 +436,11 @@ class SchedulerDllmMixin:
                     req.dllm_active_start = self.dllm_config.block_size - _remaining
                     req.dllm_active_block_steps = 0
                     req.dllm_active_remaining_masks = _remaining
+                    req.dllm_block_mask_trajectory = [_remaining]
                 else:
-                    req.dllm_active_remaining_masks = chunk.count(mask_id)
+                    _remaining = chunk.count(mask_id)
+                    req.dllm_block_mask_trajectory.append(_remaining)
+                    req.dllm_active_remaining_masks = _remaining
                 if req.dllm_active_cache_locs is None and batch.out_cache_loc is not None:
                     req.dllm_active_cache_locs = batch.out_cache_loc[
                         offset : offset + extend_len
