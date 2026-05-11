@@ -84,6 +84,39 @@ subject2category = {
 }
 
 
+def _stratified_sample(examples: list, n: int, key: str, seed: int = 0) -> list:
+    """Sample n examples proportionally from each unique value of `key`."""
+    from collections import defaultdict
+
+    rng = random.Random(seed)
+    groups: dict = defaultdict(list)
+    for ex in examples:
+        groups[ex[key]].append(ex)
+
+    total = len(examples)
+    floor_counts: dict = {}
+    remainders: dict = {}
+    allocated = 0
+    for subject, group in groups.items():
+        exact = n * len(group) / total
+        floor_val = int(exact)
+        floor_counts[subject] = floor_val
+        remainders[subject] = exact - floor_val
+        allocated += floor_val
+
+    # Distribute leftover slots to subjects with the largest fractional remainders.
+    extra = n - allocated
+    for subject in sorted(remainders, key=lambda s: -remainders[s])[:extra]:
+        floor_counts[subject] += 1
+
+    result = []
+    for subject, group in groups.items():
+        k = min(floor_counts[subject], len(group))
+        if k > 0:
+            result.extend(rng.sample(group, k))
+    return result
+
+
 class MMLUEval(Eval):
     def __init__(self, filename: str, num_examples: Optional[int], num_threads: int):
         if "://" in filename:
@@ -92,7 +125,7 @@ class MMLUEval(Eval):
             df = pandas.read_csv(filename)
         examples = [row.to_dict() for _, row in df.iterrows()]
         if num_examples:
-            examples = random.Random(0).sample(examples, num_examples)
+            examples = _stratified_sample(examples, min(num_examples, len(examples)), "Subject")
         self.examples = examples
         self.num_threads = num_threads
 

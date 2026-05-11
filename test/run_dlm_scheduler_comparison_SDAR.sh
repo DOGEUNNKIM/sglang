@@ -1,29 +1,46 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_PATH="${MODEL_PATH:-inclusionAI/LLaDA2.0-mini}"
-BLOCK_SIZE="${BLOCK_SIZE:-32}"
+MODEL_PATH="${MODEL_PATH:-JetLM/SDAR-8B-Chat}"
+BLOCK_SIZE="${BLOCK_SIZE:-16}"
 
 ################################
-TASKS=(${TASKS:-math}) #gsm8k humaneval math
-RATES_GSM8K="${RATES_GSM8K:-6 7 8 9 10}" # 5 6 7 8 9 10
+TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
+RATES_GSM8K="${RATES_GSM8K:-6 7 8 9 10}"
 RATES_HUMANEVAL="${RATES_HUMANEVAL:-10 12 14 16 18 20}"
-RATES_MATH="${RATES_MATH:-1 1.2 1.4 1.6 1.8 2}" 
-# batch 16이면 1까지는 delay 없음, 2 까지는 thread 영향 안받음 , 3이상은 안됨
-# batch 32이면 2 까지는 delay 없음
+RATES_MATH="${RATES_MATH:-1 1.2 1.4 1.6 1.8 2}"
+RATES_GPQA="${RATES_GPQA:-5 6 7 8 9}"
+RATES_MMLU="${RATES_MMLU:-5 6 7 8 9}"
+RATES_LONGBENCH_V2="${RATES_LONGBENCH_V2:-1 1.5 2 2.5 3}"
+RATES_RULER_4K="${RATES_RULER_4K:-2 3 4 5 6}"
+RATES_RULER_8K="${RATES_RULER_8K:-1 1.5 2 2.5 3}"
+RATES_RULER_16K="${RATES_RULER_16K:-0.5 0.75 1 1.25 1.5}"
+RATES_SHAREGPT="${RATES_SHAREGPT:-1 1.5 2 2.5 3}"
+# Per-task example cap (empty = full dataset). Override via env, e.g. NUM_EXAMPLES_MATH=100.
+NUM_EXAMPLES_GSM8K="${NUM_EXAMPLES_GSM8K:-}"
+NUM_EXAMPLES_HUMANEVAL="${NUM_EXAMPLES_HUMANEVAL:-}"
+NUM_EXAMPLES_MATH="${NUM_EXAMPLES_MATH:-1000}"
+NUM_EXAMPLES_GPQA="${NUM_EXAMPLES_GPQA:-}"
+NUM_EXAMPLES_MMLU="${NUM_EXAMPLES_MMLU:-1000}"
+NUM_EXAMPLES_LONGBENCH_V2="${NUM_EXAMPLES_LONGBENCH_V2:-}"
+NUM_EXAMPLES_RULER_4K="${NUM_EXAMPLES_RULER_4K:-200}"
+NUM_EXAMPLES_RULER_8K="${NUM_EXAMPLES_RULER_8K:-200}"
+NUM_EXAMPLES_RULER_16K="${NUM_EXAMPLES_RULER_16K:-200}"
+NUM_EXAMPLES_SHAREGPT="${NUM_EXAMPLES_SHAREGPT:-1000}"
 SCHEDULERS=(${SCHEDULERS:-TTFB DECODE LST SOLA FCFS PREFILL}) # TTFB DECODE LST SOLA FCFS PREFILL
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-10.0}"
 RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-20.0}"
 STRICT_PROB="${STRICT_PROB:-1}"
+TP_SIZE="${TP_SIZE:-2}" 
+MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-32}"
+WARMUP="${WARMUP:-32}"
+############ 아직 Forward 시간은 획정 아님
 #TP가 1이면 Forward 0.028
 #TP가 2이면 Forward 0.018
-TP_SIZE="${TP_SIZE:-2}" 
-MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
-WARMUP="${WARMUP:-16}"
-FORWARD_TIME_S="${FORWARD_TIME_S:-0.018}"
+FORWARD_TIME_S="${FORWARD_TIME_S:-0.035}"
 ################################
 
-OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_sched_comparison_ver2}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_sched_comparison_SDAR}"
 REQUEST_RATES=(${REQUEST_RATES:-})  # fallback when task has no per-task rates
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 # NUM_THREADS / DLLM_ADMISSION_WINDOW: when unset, auto-detected from full dataset size per task.
@@ -34,10 +51,11 @@ BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 THRESHOLD="${THRESHOLD:-0.95}"
 PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"
 DECODE_FORWARD_TIME_S="${DECODE_FORWARD_TIME_S:-}"
-CONFIG_PATH="${CONFIG_PATH:-/tmp/dlm_algo_config_sched_cmp_ver2.yaml}"
-STEP_LOG_FILE="${STEP_LOG_FILE:-/tmp/dlm_step_stats_ver2.jsonl}"
-REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-/tmp/dlm_request_latency_ver2.jsonl}"
-BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-/tmp/dlm_batch_latency_ver2.jsonl}"
+CONFIG_PATH="${CONFIG_PATH:-/tmp/dlm_algo_config_sched_cmp_SDAR.yaml}"
+STEP_LOG_FILE="${STEP_LOG_FILE:-/tmp/dlm_step_stats_SDAR.jsonl}"
+REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-/tmp/dlm_request_latency_SDAR.jsonl}"
+BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-/tmp/dlm_batch_latency_SDAR.jsonl}"
+export STEP_LOG_FILE REQUEST_LATENCY_LOG_FILE BATCH_LATENCY_LOG_FILE
 GPU_FREE_MEMORY_MIN_MB="${GPU_FREE_MEMORY_MIN_MB:-70000}"
 
 SERVER_PID=""
@@ -45,10 +63,34 @@ SERVER_PID=""
 # Full test-set sizes (fixed benchmarks — not sampled).
 _task_dataset_size() {
     case "${1}" in
-        gsm8k)     echo "1314" ;;
-        humaneval) echo "164"  ;;
-        math)      echo "1000"  ;; #5000
-        *)         echo "4000"  ;;
+        gsm8k)         echo "1314"  ;;
+        humaneval)     echo "164"   ;;
+        math)          echo "5000"  ;;
+        gpqa)          echo "198"   ;;
+        mmlu)          echo "14042" ;;
+        longbench_v2)  echo "503"   ;;
+        ruler_4k)      echo "6500"  ;;
+        ruler_8k)      echo "6500"  ;;
+        ruler_16k)     echo "6500"  ;;
+        sharegpt)      echo "70000" ;;
+        *)             echo "4000"  ;;
+    esac
+}
+
+# Per-task request cap. Returns empty string when no cap is set (use full dataset).
+_task_max_examples() {
+    case "${1}" in
+        gsm8k)         echo "${NUM_EXAMPLES_GSM8K}" ;;
+        humaneval)     echo "${NUM_EXAMPLES_HUMANEVAL}" ;;
+        math)          echo "${NUM_EXAMPLES_MATH}" ;;
+        gpqa)          echo "${NUM_EXAMPLES_GPQA}" ;;
+        mmlu)          echo "${NUM_EXAMPLES_MMLU}" ;;
+        longbench_v2)  echo "${NUM_EXAMPLES_LONGBENCH_V2}" ;;
+        ruler_4k)      echo "${NUM_EXAMPLES_RULER_4K}" ;;
+        ruler_8k)      echo "${NUM_EXAMPLES_RULER_8K}" ;;
+        ruler_16k)     echo "${NUM_EXAMPLES_RULER_16K}" ;;
+        sharegpt)      echo "${NUM_EXAMPLES_SHAREGPT}" ;;
+        *)             echo "" ;;
     esac
 }
 
@@ -195,10 +237,17 @@ declare -A IDEAL_TTFB_MS IDEAL_TPOB_MS
 # Returns space-separated rates for a given task.
 _task_rates() {
     case "${1}" in
-        gsm8k)     echo "${RATES_GSM8K}" ;;
-        humaneval) echo "${RATES_HUMANEVAL}" ;;
-        math)      echo "${RATES_MATH}" ;;
-        *)         echo "${REQUEST_RATES[*]}" ;;
+        gsm8k)         echo "${RATES_GSM8K}" ;;
+        humaneval)     echo "${RATES_HUMANEVAL}" ;;
+        math)          echo "${RATES_MATH}" ;;
+        gpqa)          echo "${RATES_GPQA}" ;;
+        mmlu)          echo "${RATES_MMLU}" ;;
+        longbench_v2)  echo "${RATES_LONGBENCH_V2}" ;;
+        ruler_4k)      echo "${RATES_RULER_4K}" ;;
+        ruler_8k)      echo "${RATES_RULER_8K}" ;;
+        ruler_16k)     echo "${RATES_RULER_16K}" ;;
+        sharegpt)      echo "${RATES_SHAREGPT}" ;;
+        *)             echo "${REQUEST_RATES[*]}" ;;
     esac
 }
 
@@ -212,12 +261,14 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
 
         {
             _task_size=$(_task_dataset_size "${TASK}")
-            _task_threads="${NUM_THREADS:-${_task_size}}"
+            _task_examples=$(_task_max_examples "${TASK}")
+            _effective_size="${_task_examples:-${_task_size}}"
+            _task_threads="${NUM_THREADS:-${_effective_size}}"
 
             if [[ "${SCHEDULER}" == "DECODE" ]]; then
                 _admission_window="${MAX_RUNNING_REQUESTS}"
             else
-                _admission_window="${DLLM_ADMISSION_WINDOW:-${_task_size}}"
+                _admission_window="${DLLM_ADMISSION_WINDOW:-${_effective_size}}"
             fi
 
             echo
@@ -276,6 +327,9 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
             wait_server_ready
             echo "[server] ready"
 
+            # Clear stale /tmp log files before this run so previous data doesn't bleed in.
+            rm -f "${STEP_LOG_FILE}" "${REQUEST_LATENCY_LOG_FILE}" "${BATCH_LATENCY_LOG_FILE}"
+
             BENCH_ARGS=(
                 test/dlm_benchmark.py
                 --base-url "${BASE_URL}"
@@ -290,6 +344,7 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
                 --output-dir "${OUT_DIR}"
                 --tp-size "${TP_SIZE}"
             )
+            [[ -n "${_task_examples}" ]] && BENCH_ARGS+=(--num-examples "${_task_examples}")
 
             PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.6 \
             python "${BENCH_ARGS[@]}"
@@ -394,9 +449,16 @@ output_root = '${OUTPUT_ROOT}'
 schedulers  = '${SCHEDULERS[*]}'.split()
 tasks       = '${TASKS[*]}'.split()
 task_rate_map = {
-    'gsm8k':     '${RATES_GSM8K}'.split(),
-    'humaneval': '${RATES_HUMANEVAL}'.split(),
-    'math':      '${RATES_MATH}'.split(),
+    'gsm8k':        '${RATES_GSM8K}'.split(),
+    'humaneval':    '${RATES_HUMANEVAL}'.split(),
+    'math':         '${RATES_MATH}'.split(),
+    'gpqa':         '${RATES_GPQA}'.split(),
+    'mmlu':         '${RATES_MMLU}'.split(),
+    'longbench_v2': '${RATES_LONGBENCH_V2}'.split(),
+    'ruler_4k':     '${RATES_RULER_4K}'.split(),
+    'ruler_8k':     '${RATES_RULER_8K}'.split(),
+    'ruler_16k':    '${RATES_RULER_16K}'.split(),
+    'sharegpt':     '${RATES_SHAREGPT}'.split(),
 }
 
 model_tag = '${MODEL_PATH}'.replace('/', '_')

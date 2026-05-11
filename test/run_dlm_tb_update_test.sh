@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_PATH="${MODEL_PATH:-inclusionAI/LLaDA2.0-mini}" #JetLM/SDAR-4B-Chat
+MODEL_PATH="${MODEL_PATH:-inclusionAI/LLaDA2.0-mini}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_results}"
 BLOCK_SIZE="${BLOCK_SIZE:-32}" #4
 WARMUP="${WARMUP:-16}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 REQUEST_RATES=(${REQUEST_RATES:-200}) #0.5 1 1.5
-TASKS=(${TASKS:-math}) ##### TASK humaneval math gsm8k
+TASKS=(${TASKS:-ruler_8k}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
 NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
 PORT="${PORT:-30000}"
@@ -26,6 +26,7 @@ CONFIG_PATH="${CONFIG_PATH:-/tmp/dlm_algo_config.yaml}"
 STEP_LOG_FILE="${STEP_LOG_FILE:-/tmp/dlm_step_stats.jsonl}"
 REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-/tmp/dlm_request_latency.jsonl}"
 BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-/tmp/dlm_batch_latency.jsonl}"
+export STEP_LOG_FILE REQUEST_LATENCY_LOG_FILE BATCH_LATENCY_LOG_FILE
 TP_SIZE="${TP_SIZE:-1}"
 
 SERVER_PID=""
@@ -38,6 +39,12 @@ _ideal_ttfb_ms() {
         gsm8k)     echo "417.2" ;;
         humaneval) echo "312.9" ;;
         math)      echo "404.5" ;;
+        gpqa)      echo "417.2" ;;
+        mmlu)      echo "417.2" ;;
+        ruler_4k)  echo "417.2" ;;
+        ruler_8k)  echo "417.2" ;;
+        ruler_16k) echo "417.2" ;;
+        sharegpt)  echo "417.2" ;;
         *)         echo "417.2" ;;
     esac
 }
@@ -47,6 +54,12 @@ _ideal_tpob_ms() {
         gsm8k)     echo "348.5" ;;
         humaneval) echo "158.8" ;;
         math)      echo "436.5" ;;
+        gpqa)      echo "348.5" ;;
+        mmlu)      echo "348.5" ;;
+        ruler_4k)  echo "348.5" ;;
+        ruler_8k)  echo "348.5" ;;
+        ruler_16k) echo "348.5" ;;
+        sharegpt)  echo "348.5" ;;
         *)         echo "348.5" ;;
     esac
 }
@@ -189,15 +202,19 @@ for RATE in "${REQUEST_RATES[@]}"; do
             --dllm-algorithm-config "${CONFIG_PATH}" \
             --attention-backend flashinfer \
             --max-running-requests "${MAX_RUNNING_REQUESTS}" \
+            --tp-size "${TP_SIZE}" \
+            --mem-fraction-static 0.85 \
             --cuda-graph-max-bs "${MAX_RUNNING_REQUESTS}" \
             --disable-cuda-graph-padding \
-            --tp-size "${TP_SIZE}" \
             >> /tmp/dlm_results/run_dlm_slo_server_log.txt 2>&1 &
         SERVER_PID=$!
 
         echo "[server] pid=${SERVER_PID}, waiting for ${BASE_URL}/health"
         wait_server_ready
         echo "[server] ready"
+
+        # Clear stale /tmp log files before this run so previous data doesn't bleed in.
+        rm -f "${STEP_LOG_FILE}" "${REQUEST_LATENCY_LOG_FILE}" "${BATCH_LATENCY_LOG_FILE}"
 
         BENCH_ARGS=(
             test/dlm_benchmark.py

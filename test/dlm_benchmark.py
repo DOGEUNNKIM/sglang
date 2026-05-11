@@ -61,9 +61,9 @@ os.environ.setdefault("OPENAI_API_KEY", "EMPTY")
 # Step stats 수집
 # ──────────────────────────────────────────────────────────────────────────────
 
-STEP_LOG_FILE = "/tmp/dlm_step_stats.jsonl"
-REQUEST_LATENCY_LOG_FILE = "/tmp/dlm_request_latency.jsonl"
-BATCH_LATENCY_LOG_FILE = "/tmp/dlm_batch_latency.jsonl"
+STEP_LOG_FILE = os.environ.get("STEP_LOG_FILE", "/tmp/dlm_step_stats.jsonl")
+REQUEST_LATENCY_LOG_FILE = os.environ.get("REQUEST_LATENCY_LOG_FILE", "/tmp/dlm_request_latency.jsonl")
+BATCH_LATENCY_LOG_FILE = os.environ.get("BATCH_LATENCY_LOG_FILE", "/tmp/dlm_batch_latency.jsonl")
 
 
 def clear_step_log():
@@ -252,6 +252,100 @@ class LocalMathEval:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# RULER long-context eval (simonjegou/ruler)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class RulerEval:
+    """Evaluate on RULER (NIAH + related subtasks) at a fixed context length."""
+
+    def __init__(self, context_length: int, num_examples: Optional[int], num_threads: int):
+        try:
+            from datasets import load_dataset
+        except ImportError:
+            raise ImportError("pip install datasets  # required for ruler tasks")
+
+        ds = load_dataset(RULER_DATASET_ID, str(context_length), split="test")
+        examples = [dict(row) for row in ds]
+        if num_examples:
+            examples = random.Random(0).sample(examples, min(num_examples, len(examples)))
+        self.examples = examples
+        self.num_threads = num_threads
+
+    def __call__(self, sampler) -> object:
+        from sglang.test import simple_eval_common as common
+        from sglang.test.simple_eval_common import SingleEvalResult
+
+        def fn(row: dict) -> SingleEvalResult:
+            prompt_messages = [sampler._pack_message(
+                content=f"{row['context']}\n\n{row['question']}",
+                role="user",
+            )]
+            try:
+                response_text = sampler(prompt_messages) or ""
+            except Exception:
+                response_text = ""
+            gold_answers = row["answer"]
+            score = float(any(ans.lower() in response_text.lower() for ans in gold_answers))
+            return SingleEvalResult(score=score)
+
+        results = common.map_with_progress(fn, self.examples, self.num_threads)
+        return common.aggregate_results(results, default_stats=("mean", "std"))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ShareGPT latency benchmark (no accuracy)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class ShareGPTEval:
+    """Send ShareGPT first-turn prompts; measures latency only (score=None)."""
+
+    def __init__(self, num_examples: int, num_threads: int, data_path: Optional[str] = None):
+        import json
+        from sglang.benchmark.utils import download_and_cache_hf_file, is_file_valid_json
+
+        filename = data_path
+        if not filename or not is_file_valid_json(filename):
+            filename = download_and_cache_hf_file(
+                repo_id=SHAREGPT_REPO_ID,
+                filename=SHAREGPT_FILENAME,
+            )
+
+        with open(filename) as f:
+            dataset = json.load(f)
+
+        dataset = [
+            data for data in dataset
+            if len(data.get("conversations", data.get("conversation", []))) >= 1
+        ]
+        random.shuffle(dataset)
+
+        self.examples = []
+        for data in dataset:
+            if len(self.examples) >= num_examples:
+                break
+            convs = data.get("conversations", data.get("conversation", []))
+            if convs:
+                self.examples.append({"prompt": convs[0]["value"]})
+
+        self.num_threads = num_threads
+
+    def __call__(self, sampler) -> object:
+        from sglang.test import simple_eval_common as common
+        from sglang.test.simple_eval_common import SingleEvalResult
+
+        def fn(row: dict) -> SingleEvalResult:
+            prompt_messages = [sampler._pack_message(content=row["prompt"], role="user")]
+            try:
+                sampler(prompt_messages)
+            except Exception:
+                pass
+            return SingleEvalResult(score=None)
+
+        results = common.map_with_progress(fn, self.examples, self.num_threads)
+        return common.aggregate_results(results)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 서버 관리
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -354,8 +448,37 @@ def run_warmup(base_url: str, model: str, num_requests: int = 4) -> None:
 # 태스크 실행
 # ──────────────────────────────────────────────────────────────────────────────
 
-TASK_API = {"gsm8k": "completion", "humaneval": "chat", "math": "chat"}
-TASK_MAX_TOKENS = {"gsm8k": 512, "humaneval": 512, "math": 8192}
+TASK_API = {
+    "gsm8k": "completion",
+    "humaneval": "chat",
+    "math": "chat",
+    "gpqa": "chat",
+    "mmlu": "chat",
+    "longbench_v2": "chat",
+    "ruler_4k": "chat",
+    "ruler_8k": "chat",
+    "ruler_16k": "chat",
+    "sharegpt": "chat",
+}
+TASK_MAX_TOKENS = {
+    "math": 2048,
+    "gpqa": 2048,
+    "gsm8k": 512,
+    "humaneval": 512,
+    "mmlu": 512,
+    "longbench_v2": 512,
+    "ruler_4k": 128,
+    "ruler_8k": 128,
+    "ruler_16k": 128,
+    "sharegpt": 512,
+}
+
+GPQA_DEFAULT_URL = "https://openaipublic.blob.core.windows.net/simple-evals/gpqa_diamond.csv"
+MMLU_DEFAULT_URL = "https://openaipublic.blob.core.windows.net/simple-evals/mmlu.csv"
+LONGBENCH_V2_DEFAULT_SOURCE = "THUDM/LongBench-v2"
+RULER_DATASET_ID = "simonjegou/ruler"
+SHAREGPT_REPO_ID = "anon8231489123/ShareGPT_Vicuna_unfiltered"
+SHAREGPT_FILENAME = "ShareGPT_V3_unfiltered_cleaned_split.json"
 
 
 def _make_sampler(task: str, base_url: str, model: str,
@@ -403,6 +526,10 @@ def run_task(task: str, base_url: str, model: str,
              num_examples: Optional[int], num_threads: int,
              gsm8k_data_path: Optional[str] = None,
              math_data_path: Optional[str] = None,
+             gpqa_data_path: Optional[str] = None,
+             mmlu_data_path: Optional[str] = None,
+             longbench_v2_data_path: Optional[str] = None,
+             sharegpt_data_path: Optional[str] = None,
              request_rate: Optional[float] = None,
              num_output_blocks: int = 0,
              block_size: int = 32) -> Dict:
@@ -429,6 +556,32 @@ def run_task(task: str, base_url: str, model: str,
     elif task == "math":
         eval_obj = LocalMathEval(num_examples=num_examples, num_threads=num_threads,
                                  data_path=math_data_path)
+    elif task == "gpqa":
+        from sglang.test.simple_eval_gpqa import GPQAEval
+        filename = gpqa_data_path or GPQA_DEFAULT_URL
+        GPQA_TOTAL = 198  # gpqa_diamond.csv has 198 examples
+        gpqa_examples = min(num_examples, GPQA_TOTAL) if num_examples else None
+        eval_obj = GPQAEval(filename=filename, num_examples=gpqa_examples,
+                            num_threads=num_threads)
+    elif task == "mmlu":
+        from sglang.test.simple_eval_mmlu import MMLUEval
+        filename = mmlu_data_path or MMLU_DEFAULT_URL
+        eval_obj = MMLUEval(filename=filename, num_examples=num_examples,
+                            num_threads=num_threads)
+    elif task == "longbench_v2":
+        from sglang.test.simple_eval_longbench_v2 import LongBenchV2Eval
+        source = longbench_v2_data_path or LONGBENCH_V2_DEFAULT_SOURCE
+        eval_obj = LongBenchV2Eval(model=model, data_source=source,
+                                   num_examples=num_examples, num_threads=num_threads)
+    elif task in ("ruler_4k", "ruler_8k", "ruler_16k"):
+        context_length = int(task.split("_")[1].rstrip("k")) * 1024
+        ruler_examples = num_examples or 500
+        eval_obj = RulerEval(context_length=context_length, num_examples=ruler_examples,
+                             num_threads=num_threads)
+    elif task == "sharegpt":
+        sharegpt_examples = num_examples or 1000
+        eval_obj = ShareGPTEval(num_examples=sharegpt_examples, num_threads=num_threads,
+                                data_path=sharegpt_data_path)
     else:
         raise ValueError(f"Unknown task: {task}")
 
@@ -2383,7 +2536,8 @@ def main():
 
     # 벤치마크
     parser.add_argument("--tasks", nargs="+",
-                        choices=["gsm8k", "humaneval", "math"],
+                        choices=["gsm8k", "humaneval", "math", "gpqa", "mmlu",
+                                 "ruler_4k", "ruler_8k", "ruler_16k", "sharegpt"],
                         default=["gsm8k", "humaneval", "math"])
     parser.add_argument("--num-examples", type=int, default=None)
     parser.add_argument("--num-threads", type=int, default=200)
@@ -2391,6 +2545,14 @@ def main():
                         help="전체 request 시작 rate(req/s). 미지정 시 기존 closed-loop 방식")
     parser.add_argument("--gsm8k-data-path", type=str, default=None)
     parser.add_argument("--math-data-path", type=str, default=None)
+    parser.add_argument("--gpqa-data-path", type=str, default=None,
+                        help=f"GPQA CSV 경로 (미지정 시 {GPQA_DEFAULT_URL})")
+    parser.add_argument("--mmlu-data-path", type=str, default=None,
+                        help=f"MMLU CSV 경로 (미지정 시 {MMLU_DEFAULT_URL})")
+    parser.add_argument("--longbench-v2-data-path", type=str, default=None,
+                        help=f"LongBench v2 경로/HF ID (미지정 시 {LONGBENCH_V2_DEFAULT_SOURCE})")
+    parser.add_argument("--sharegpt-data-path", type=str, default=None,
+                        help="ShareGPT JSON 파일 경로 (미지정 시 HF에서 자동 다운로드)")
 
     # 출력
     parser.add_argument("--output-dir", type=str, default="/tmp/dlm_results")
@@ -2468,6 +2630,10 @@ def main():
                 num_examples=args.num_examples, num_threads=args.num_threads,
                 gsm8k_data_path=args.gsm8k_data_path,
                 math_data_path=args.math_data_path,
+                gpqa_data_path=args.gpqa_data_path,
+                mmlu_data_path=args.mmlu_data_path,
+                longbench_v2_data_path=args.longbench_v2_data_path,
+                sharegpt_data_path=args.sharegpt_data_path,
                 request_rate=args.request_rate,
                 num_output_blocks=args.num_output_blocks,
                 block_size=effective_block_size,
