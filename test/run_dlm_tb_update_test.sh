@@ -7,12 +7,12 @@ MODEL_PATH="${MODEL_PATH:-JetLM/SDAR-8B-Chat}" #JetLM/SDAR-8B-Chat inclusionAI/L
 ######
 
 OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_results}"
-WARMUP="${WARMUP:-16}"
+WARMUP="${WARMUP:-32}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 REQUEST_RATES=(${REQUEST_RATES:-100})
-TASKS=(${TASKS:-humaneval gsm8k}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
+TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu ruler_4k sharegpt}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
 NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
-MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
+MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-32}"
 PORT="${PORT:-30000}"
 #DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-100}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
@@ -30,7 +30,7 @@ STEP_LOG_FILE="${STEP_LOG_FILE:-/tmp/dlm_step_stats.jsonl}"
 REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-/tmp/dlm_request_latency.jsonl}"
 BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-/tmp/dlm_batch_latency.jsonl}"
 export STEP_LOG_FILE REQUEST_LATENCY_LOG_FILE BATCH_LATENCY_LOG_FILE
-TP_SIZE="${TP_SIZE:-1}"
+TP_SIZE="${TP_SIZE:-2}"
 
 SERVER_PID=""
 
