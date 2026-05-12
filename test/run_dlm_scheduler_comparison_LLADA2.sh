@@ -38,7 +38,8 @@ TP_SIZE="${TP_SIZE:-2}"
 FORWARD_TIME_S="${FORWARD_TIME_S:-0.025}"
 ################################
 
-OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_sched_comparison_LLADA2}"
+SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/nvme0/kdg6245}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRATCH_ROOT}/dlm_sched_comparison_LLADA2}"
 REQUEST_RATES=(${REQUEST_RATES:-})  # fallback when task has no per-task rates
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 # NUM_THREADS / DLLM_ADMISSION_WINDOW: when unset, auto-detected from full dataset size per task.
@@ -49,10 +50,10 @@ BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 THRESHOLD="${THRESHOLD:-0.95}"
 PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"
 DECODE_FORWARD_TIME_S="${DECODE_FORWARD_TIME_S:-}"
-CONFIG_PATH="${CONFIG_PATH:-/tmp/dlm_algo_config_sched_cmp_LLADA2.yaml}"
-STEP_LOG_FILE="${STEP_LOG_FILE:-/tmp/dlm_step_stats_LLADA2.jsonl}"
-REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-/tmp/dlm_request_latency_LLADA2.jsonl}"
-BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-/tmp/dlm_batch_latency_LLADA2.jsonl}"
+CONFIG_PATH="${CONFIG_PATH:-${OUTPUT_ROOT}/dlm_algo_config_sched_cmp_LLADA2.yaml}"
+STEP_LOG_FILE="${STEP_LOG_FILE:-${OUTPUT_ROOT}/dlm_step_stats_LLADA2.jsonl}"
+REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-${OUTPUT_ROOT}/dlm_request_latency_LLADA2.jsonl}"
+BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-${OUTPUT_ROOT}/dlm_batch_latency_LLADA2.jsonl}"
 export STEP_LOG_FILE REQUEST_LATENCY_LOG_FILE BATCH_LATENCY_LOG_FILE
 GPU_FREE_MEMORY_MIN_MB="${GPU_FREE_MEMORY_MIN_MB:-70000}"
 
@@ -219,7 +220,7 @@ except Exception:
 
 # _cleanup_benchmark_outputs OUT_DIR TASK
 # Keep the logs needed by dlm_slorate.py and plot_step_dist.py, and drop
-# duplicated/raw benchmark artifacts that make large sweeps fill /tmp quickly.
+# duplicated/raw benchmark artifacts that make large sweeps fill scratch quickly.
 _cleanup_benchmark_outputs() {
     local _out="${1}" _task="${2}"
     local _model_tag="${MODEL_PATH//\//_}"
