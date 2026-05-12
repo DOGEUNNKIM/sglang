@@ -1416,10 +1416,10 @@ def main():
             ]
             block_size = max(all_steps_flat) if all_steps_flat else 32
 
-        if args.log:
-            plot_step_distributions(step_data, block_size=block_size,
-                                    model_name=model, output_dir=args.output_dir)
-            plot_latency_metrics(latency_data, model_name=model, output_dir=args.output_dir)
+        #if args.log:
+        #    plot_step_distributions(step_data, block_size=block_size,
+        #                            model_name=model, output_dir=args.output_dir)
+        #    plot_latency_metrics(latency_data, model_name=model, output_dir=args.output_dir)
 
     finally:
         if server_proc is not None:

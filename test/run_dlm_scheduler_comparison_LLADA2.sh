@@ -36,7 +36,8 @@ TP_SIZE="${TP_SIZE:-1}"
 FORWARD_TIME_S="${FORWARD_TIME_S:-0.030}"
 ################################
 
-OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_sched_comparison_LLADA2_baseline}"
+SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/nvme0/kdg6245}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRATCH_ROOT}/dlm_sched_comparison_LLADA2_baseline}"
 REQUEST_RATES=(${REQUEST_RATES:-})
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 NUM_THREADS="${NUM_THREADS:-}"
@@ -46,10 +47,10 @@ BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 THRESHOLD="${THRESHOLD:-0.95}"
 PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"
 DECODE_FORWARD_TIME_S="${DECODE_FORWARD_TIME_S:-}"
-CONFIG_PATH="${CONFIG_PATH:-/tmp/dlm_algo_config_sched_cmp_LLADA2_baseline.yaml}"
-STEP_LOG_FILE="${STEP_LOG_FILE:-/tmp/dlm_step_stats_LLADA2_baseline.jsonl}"
-REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-/tmp/dlm_request_latency_LLADA2_baseline.jsonl}"
-BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-/tmp/dlm_batch_latency_LLADA2_baseline.jsonl}"
+CONFIG_PATH="${CONFIG_PATH:-${OUTPUT_ROOT}/dlm_algo_config_sched_cmp_LLADA2_baseline.yaml}"
+STEP_LOG_FILE="${STEP_LOG_FILE:-${OUTPUT_ROOT}/dlm_step_stats_LLADA2_baseline.jsonl}"
+REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-${OUTPUT_ROOT}/dlm_request_latency_LLADA2_baseline.jsonl}"
+BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-${OUTPUT_ROOT}/dlm_batch_latency_LLADA2_baseline.jsonl}"
 export STEP_LOG_FILE REQUEST_LATENCY_LOG_FILE BATCH_LATENCY_LOG_FILE
 GPU_FREE_MEMORY_MIN_MB="${GPU_FREE_MEMORY_MIN_MB:-70000}"
 
@@ -205,6 +206,42 @@ except Exception:
 "
 }
 
+# _cleanup_benchmark_outputs OUT_DIR TASK
+# Keep the logs needed by dlm_slorate.py and plot_step_dist.py, and drop
+# duplicated/raw benchmark artifacts that make large sweeps fill scratch quickly.
+_cleanup_benchmark_outputs() {
+    local _out="${1}" _task="${2}"
+    local _model_tag="${MODEL_PATH//\//_}"
+    local _summary="${_out}/summary_${_model_tag}.json"
+
+    rm -f "${_out}/steps_${_task}.jsonl"
+    rm -f "${_out}/step_dist_${_model_tag}.png" \
+          "${_out}/step_boxplot_${_model_tag}.png" \
+          "${_out}/request_latency_${_model_tag}.png" \
+          "${_out}/batch_latency_${_model_tag}.png" \
+          "${_out}/phase_sequence_${_model_tag}.png" \
+          "${_out}/phase_composition_${_model_tag}.png"
+
+    if [[ -f "${_summary}" ]]; then
+        python3 - "${_summary}" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+tmp = path.with_suffix(path.suffix + ".tmp")
+with path.open() as f:
+    data = json.load(f)
+data.pop("latency_data", None)
+data.pop("step_data", None)
+with tmp.open("w") as f:
+    json.dump(data, f, indent=2)
+os.replace(tmp, path)
+PY
+    fi
+}
+
 trap stop_server EXIT
 
 SERVER_LOG="${OUTPUT_ROOT}/server_log.txt"
@@ -332,8 +369,10 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
             python "${BENCH_ARGS[@]}"
 
             [[ -f "${STEP_LOG_FILE}" ]] && cp "${STEP_LOG_FILE}" "${OUT_DIR}/step_stats_${TASK}.jsonl"
+            _cleanup_benchmark_outputs "${OUT_DIR}" "${TASK}"
 
             stop_server
+            rm -f "${STEP_LOG_FILE}" "${REQUEST_LATENCY_LOG_FILE}" "${BATCH_LATENCY_LOG_FILE}"
         }  # TASK block
         done  # RATE
     done  # TASK
