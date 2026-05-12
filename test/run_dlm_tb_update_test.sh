@@ -304,14 +304,16 @@ for RATE in "${REQUEST_RATES[@]}"; do
     for THREADS in "${NUM_THREADS_SWEEP[@]}"; do
         OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}/threads_${THREADS}"
 
-        echo
-        echo "Step distribution: request_rate=${RATE}, threads=${THREADS}"
-        echo "------------------------------------------------------------"
+        for TASK in "${TASKS[@]}"; do
+            echo
+            echo "Step distribution: request_rate=${RATE}, threads=${THREADS}, task=${TASK}"
+            echo "------------------------------------------------------------"
 
-        python test/plot_step_dist.py \
-            --log-dir "${OUT_DIR}" \
-            --tasks "${TASKS[@]}" \
-            --output "${OUT_DIR}/step_dist_${MODEL_SLUG}.png"
+            python test/plot_step_dist.py \
+                --log-dir "${OUT_DIR}" \
+                --tasks "${TASK}" \
+                --output "${OUT_DIR}/step_dist_${MODEL_SLUG}_${TASK}.png"
+        done
     done
 done
 

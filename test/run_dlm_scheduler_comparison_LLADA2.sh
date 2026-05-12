@@ -6,12 +6,12 @@ BLOCK_SIZE="${BLOCK_SIZE:-32}"
 
 ################################
 TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu sharegpt}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
-RATES_GSM8K="${RATES_GSM8K:-5 6 7 8 9}"
-RATES_MMLU="${RATES_MMLU:-1 2 3 4}"
-RATES_HUMANEVAL="${RATES_HUMANEVAL:-12 14 16 20 24}" #10 12 14 16 18
-RATES_MATH="${RATES_MATH:-1 2 3 4 5}"
-RATES_GPQA="${RATES_GPQA:-1 2 3 4 5}"
-RATES_SHAREGPT="${RATES_SHAREGPT:-3 4 5 6 7 8 9}"
+RATES_GSM8K="${RATES_GSM8K:-9 10 11 12 13}"
+RATES_MMLU="${RATES_MMLU:-1 1.5 2 2.5 3}"
+RATES_HUMANEVAL="${RATES_HUMANEVAL:-12 14 16 18 20}" # 결정
+RATES_MATH="${RATES_MATH:-1 1.2 1.4 1.6 1.8 2}" 
+RATES_GPQA="${RATES_GPQA:-0.2 0.4 0.6 0.8 1}" # 결정
+RATES_SHAREGPT="${RATES_SHAREGPT:-1 1.5 2 2.5 3}"
 RATES_RULER_4K="${RATES_RULER_4K:-2 3 4 5 6}"
 RATES_RULER_8K="${RATES_RULER_8K:-0.5 0.75 1 1.25 1.5}"
 RATES_RULER_16K="${RATES_RULER_16K:-0.5 0.75 1 1.25 1.5}"
@@ -31,11 +31,11 @@ SCHEDULERS=(${SCHEDULERS:-TTFB DECODE LST SOLA FCFS PREFILL}) # TTFB DECODE LST 
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-10.0}"
 RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-20.0}"
 STRICT_PROB="${STRICT_PROB:-1}"
-#TP가 2, batch 32이면 Forward 0.03
+#TP가 2, batch 32이면 Forward 0.025
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-32}"
 WARMUP="${WARMUP:-32}"
 TP_SIZE="${TP_SIZE:-2}" 
-FORWARD_TIME_S="${FORWARD_TIME_S:-0.03}"
+FORWARD_TIME_S="${FORWARD_TIME_S:-0.025}"
 ################################
 
 OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_sched_comparison_LLADA2}"
@@ -347,6 +347,8 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
             PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.6 \
             python "${BENCH_ARGS[@]}"
 
+            [[ -f "${STEP_LOG_FILE}" ]] && cp "${STEP_LOG_FILE}" "${OUT_DIR}/step_stats_${TASK}.jsonl"
+
             stop_server
         }  # TASK block
         done  # RATE
@@ -523,6 +525,31 @@ for sched in schedulers:
                 continue
             print(f'{sched:<10} {task:<12} {rate:>6} {fmt(r[\"score\"]):>8} {fmt(r[\"strict_ttfb\"]):>10} {fmt(r[\"strict_tpob\"]):>10} {fmt(r[\"strict_all\"]):>9} {fmt(r[\"relaxed_ttfb\"]):>10} {fmt(r[\"relaxed_tpob\"]):>10} {fmt(r[\"relaxed_all\"]):>9} {fms(r[\"p99_ttfb_ms\"]):>10} {fms(r[\"p99_tpob_ms\"]):>10}')
 "
+
+echo
+echo "============================================================"
+echo "Step distribution plots"
+echo "============================================================"
+
+MODEL_SLUG="${MODEL_PATH//\//_}"
+
+for SCHEDULER in "${SCHEDULERS[@]}"; do
+    for TASK in "${TASKS[@]}"; do
+        _rates=($(_task_rates "${TASK}"))
+        for RATE in "${_rates[@]}"; do
+            OUT_DIR="${OUTPUT_ROOT}/scheduler_${SCHEDULER}/request_rate_${RATE}"
+
+            echo
+            echo "Step distribution: scheduler=${SCHEDULER}, task=${TASK}, rate=${RATE}"
+            echo "------------------------------------------------------------"
+
+            python test/plot_step_dist.py \
+                --log-dir "${OUT_DIR}" \
+                --tasks "${TASK}" \
+                --output "${OUT_DIR}/step_dist_${MODEL_SLUG}_${TASK}.png"
+        done
+    done
+done
 
 echo
 echo "Done. Results are under ${OUTPUT_ROOT}/scheduler_*/request_rate_*/"
