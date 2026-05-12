@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ###### model config ######
-BLOCK_SIZE="${BLOCK_SIZE:-16}" #16 32
-MODEL_PATH="${MODEL_PATH:-JetLM/SDAR-8B-Chat}" #JetLM/SDAR-8B-Chat inclusionAI/LLaDA2.0-mini
+BLOCK_SIZE="${BLOCK_SIZE:-32}" #16 32
+MODEL_PATH="${MODEL_PATH:-inclusionAI/LLaDA2.0-mini}" #JetLM/SDAR-8B-Chat inclusionAI/LLaDA2.0-mini
 ######
 
 OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_results}"
@@ -304,16 +304,14 @@ for RATE in "${REQUEST_RATES[@]}"; do
     for THREADS in "${NUM_THREADS_SWEEP[@]}"; do
         OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}/threads_${THREADS}"
 
-        for TASK in "${TASKS[@]}"; do
-            echo
-            echo "Step distribution: request_rate=${RATE}, threads=${THREADS}, task=${TASK}"
-            echo "------------------------------------------------------------"
+        echo
+        echo "Step distribution: request_rate=${RATE}, threads=${THREADS}"
+        echo "------------------------------------------------------------"
 
-            python test/plot_step_dist.py \
-                --log-dir "${OUT_DIR}" \
-                --tasks "${TASK}" \
-                --output "${OUT_DIR}/step_dist_${MODEL_SLUG}_${TASK}.png"
-        done
+        python test/plot_step_dist.py \
+            --log-dir "${OUT_DIR}" \
+            --tasks "${TASKS[@]}" \
+            --output "${OUT_DIR}/step_dist_${MODEL_SLUG}.png"
     done
 done
 
