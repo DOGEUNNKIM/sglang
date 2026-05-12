@@ -2767,29 +2767,29 @@ def main():
             ]
             block_size = max(all_steps_flat) if all_steps_flat else 32
 
-        if args.log:
-            plot_step_distributions(step_data, block_size=block_size,
-                                    model_name=model, output_dir=args.output_dir)
-            plot_forward_latency(step_data, model_name=model, output_dir=args.output_dir)
-            plot_context_length_distribution(latency_data, model_name=model, output_dir=args.output_dir)
-            plot_scheduling_delays(latency_data, model_name=model, output_dir=args.output_dir)
-            plot_ttfb_per_request(latency_data, model_name=model, output_dir=args.output_dir)
-            plot_tpob_per_request(latency_data, model_name=model, output_dir=args.output_dir)
-            plot_request_slo_scatter(
-                latency_data,
-                slo_data=slo_data,
-                model_name=model,
-                output_dir=args.output_dir,
-            )
-            plot_request_raw_scatter(
-                latency_data,
-                slo_data=slo_data,
-                model_name=model,
-                output_dir=args.output_dir,
-            )
-            plot_avg_block_steps_per_request(latency_data, model_name=model, output_dir=args.output_dir)
-            plot_tpob_by_block_index(latency_data, model_name=model, output_dir=args.output_dir)
-            plot_block_steps_per_request(latency_data, model_name=model, output_dir=args.output_dir)
+        #if args.log:
+            #plot_step_distributions(step_data, block_size=block_size,
+            #                        model_name=model, output_dir=args.output_dir)
+            #plot_forward_latency(step_data, model_name=model, output_dir=args.output_dir)
+            #plot_context_length_distribution(latency_data, model_name=model, output_dir=args.output_dir)
+            #plot_scheduling_delays(latency_data, model_name=model, output_dir=args.output_dir)
+            #plot_ttfb_per_request(latency_data, model_name=model, output_dir=args.output_dir)
+            #plot_tpob_per_request(latency_data, model_name=model, output_dir=args.output_dir)
+            #plot_request_slo_scatter(
+            #    latency_data,
+            #    slo_data=slo_data,
+            #    model_name=model,
+            #    output_dir=args.output_dir,
+            #)
+            #plot_request_raw_scatter(
+            #    latency_data,
+            #    slo_data=slo_data,
+            #    model_name=model,
+            #    output_dir=args.output_dir,
+            #)
+            #plot_avg_block_steps_per_request(latency_data, model_name=model, output_dir=args.output_dir)
+            #plot_tpob_by_block_index(latency_data, model_name=model, output_dir=args.output_dir)
+            #plot_block_steps_per_request(latency_data, model_name=model, output_dir=args.output_dir)
             # takes too long time to make figure
             #plot_latency_metrics(latency_data, model_name=model, output_dir=args.output_dir)
 
