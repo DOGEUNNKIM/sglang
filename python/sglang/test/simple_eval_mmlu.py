@@ -84,6 +84,25 @@ subject2category = {
 }
 
 
+def _stratified_sample(examples, num_examples, key="Subject", seed=0):
+    """Sample proportionally by `key` so subject coverage is preserved."""
+    from collections import defaultdict
+    buckets = defaultdict(list)
+    for ex in examples:
+        buckets[ex.get(key, "")].append(ex)
+    rng = random.Random(seed)
+    sampled = []
+    n_subjects = len(buckets)
+    per_subject = max(1, num_examples // n_subjects)
+    for bucket in buckets.values():
+        sampled.extend(rng.sample(bucket, min(per_subject, len(bucket))))
+    # top up to exactly num_examples if rounding left gaps
+    remainder = [ex for ex in examples if ex not in sampled]
+    rng.shuffle(remainder)
+    sampled.extend(remainder[: max(0, num_examples - len(sampled))])
+    return sampled[:num_examples]
+
+
 class MMLUEval(Eval):
     def __init__(self, filename: str, num_examples: Optional[int], num_threads: int):
         if "://" in filename:
@@ -92,7 +111,7 @@ class MMLUEval(Eval):
             df = pandas.read_csv(filename)
         examples = [row.to_dict() for _, row in df.iterrows()]
         if num_examples:
-            examples = random.Random(0).sample(examples, num_examples)
+            examples = _stratified_sample(examples, num_examples)
         self.examples = examples
         self.num_threads = num_threads
 

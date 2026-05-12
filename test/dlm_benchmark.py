@@ -39,9 +39,9 @@ os.environ.setdefault("OPENAI_API_KEY", "EMPTY")
 # Step stats 수집
 # ──────────────────────────────────────────────────────────────────────────────
 
-STEP_LOG_FILE = "/tmp/dlm_step_stats.jsonl"
-REQUEST_LATENCY_LOG_FILE = "/tmp/dlm_request_latency.jsonl"
-BATCH_LATENCY_LOG_FILE = "/tmp/dlm_batch_latency.jsonl"
+STEP_LOG_FILE = os.environ.get("STEP_LOG_FILE", "/tmp/dlm_step_stats.jsonl")
+REQUEST_LATENCY_LOG_FILE = os.environ.get("REQUEST_LATENCY_LOG_FILE", "/tmp/dlm_request_latency.jsonl")
+BATCH_LATENCY_LOG_FILE = os.environ.get("BATCH_LATENCY_LOG_FILE", "/tmp/dlm_batch_latency.jsonl")
 
 
 def clear_step_log():
@@ -96,7 +96,18 @@ def _flatten_steps(values) -> List[int]:
 def _normalize_step_record(raw: Any) -> Dict[str, Any]:
     if isinstance(raw, dict):
         raw_forward_calls = raw.get("raw_forward_calls")
-        block_steps = _flatten_steps(raw.get("block_steps", []))
+        if "final_block_steps" in raw:
+            block_steps = _flatten_steps(raw.get("final_block_steps", []))
+        elif "kv_saved" in raw and "block_steps" in raw:
+            steps = _flatten_steps(raw.get("block_steps", []))
+            saved = raw.get("kv_saved", [])
+            block_steps = [
+                int(step)
+                for step, is_saved in zip(steps, saved)
+                if bool(is_saved)
+            ]
+        else:
+            block_steps = _flatten_steps(raw.get("block_steps", []))
     else:
         raw_forward_calls = None
         block_steps = _flatten_steps(raw)
@@ -109,26 +120,31 @@ def _normalize_step_record(raw: Any) -> Dict[str, Any]:
 
 
 def read_step_log() -> Dict[str, Any]:
-    """JSONL에서 raw forward calls와 block steps를 읽어 반환."""
+    """JSONL에서 raw forward calls, block steps, forward duration을 읽어 반환."""
     step_records = []
     raw_forward_calls = []
     block_steps = []
+    forward_durations_ms = []
     try:
         with open(STEP_LOG_FILE) as f:
             for line in f:
                 line = line.strip()
                 if line:
-                    record = _normalize_step_record(json.loads(line))
+                    raw = json.loads(line)
+                    record = _normalize_step_record(raw)
                     step_records.append(record)
                     if record["raw_forward_calls"] is not None:
                         raw_forward_calls.append(record["raw_forward_calls"])
                     block_steps.extend(record["block_steps"])
+                    if isinstance(raw, dict) and raw.get("forward_duration_ms") is not None:
+                        forward_durations_ms.append(float(raw["forward_duration_ms"]))
     except FileNotFoundError:
         pass
     return {
         "records": step_records,
         "raw_forward_calls": raw_forward_calls,
         "block_steps": block_steps,
+        "forward_durations_ms": forward_durations_ms,
     }
 
 
@@ -214,6 +230,107 @@ class LocalMathEval:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# RULER long-context eval (simonjegou/ruler)
+# ──────────────────────────────────────────────────────────────────────────────
+
+RULER_DATASET_ID = "simonjegou/ruler"
+
+
+class RulerEval:
+    """Evaluate on RULER (NIAH + related subtasks) at a fixed context length."""
+
+    def __init__(self, context_length: int, num_examples: Optional[int], num_threads: int):
+        try:
+            from datasets import load_dataset
+        except ImportError:
+            raise ImportError("pip install datasets  # required for ruler tasks")
+
+        ds = load_dataset(RULER_DATASET_ID, str(context_length), split="test")
+        examples = [dict(row) for row in ds]
+        if num_examples:
+            examples = random.Random(0).sample(examples, min(num_examples, len(examples)))
+        self.examples = examples
+        self.num_threads = num_threads
+
+    def __call__(self, sampler) -> object:
+        from sglang.test import simple_eval_common as common
+        from sglang.test.simple_eval_common import SingleEvalResult
+
+        def fn(row: dict) -> SingleEvalResult:
+            prompt_messages = [sampler._pack_message(
+                content=f"{row['context']}\n\n{row['question']}",
+                role="user",
+            )]
+            try:
+                response_text = sampler(prompt_messages) or ""
+            except Exception:
+                response_text = ""
+            gold_answers = row["answer"]
+            score = float(any(ans.lower() in response_text.lower() for ans in gold_answers))
+            return SingleEvalResult(score=score)
+
+        results = common.map_with_progress(fn, self.examples, self.num_threads)
+        return common.aggregate_results(results, default_stats=("mean", "std"))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ShareGPT latency benchmark (no accuracy)
+# ──────────────────────────────────────────────────────────────────────────────
+
+SHAREGPT_REPO_ID = "anon8231489123/ShareGPT_Vicuna_unfiltered"
+SHAREGPT_FILENAME = "ShareGPT_V3_unfiltered_cleaned_split.json"
+
+
+class ShareGPTEval:
+    """Send ShareGPT first-turn prompts; measures latency only (score=None)."""
+
+    def __init__(self, num_examples: int, num_threads: int, data_path: Optional[str] = None):
+        import json
+        from sglang.benchmark.utils import download_and_cache_hf_file, is_file_valid_json
+
+        filename = data_path
+        if not filename or not is_file_valid_json(filename):
+            filename = download_and_cache_hf_file(
+                repo_id=SHAREGPT_REPO_ID,
+                filename=SHAREGPT_FILENAME,
+            )
+
+        with open(filename) as f:
+            dataset = json.load(f)
+
+        dataset = [
+            data for data in dataset
+            if len(data.get("conversations", data.get("conversation", []))) >= 1
+        ]
+        random.shuffle(dataset)
+
+        self.examples = []
+        for data in dataset:
+            if len(self.examples) >= num_examples:
+                break
+            convs = data.get("conversations", data.get("conversation", []))
+            if convs:
+                self.examples.append({"prompt": convs[0]["value"]})
+
+        self.num_threads = num_threads
+
+    def __call__(self, sampler) -> object:
+        from sglang.test import simple_eval_common as common
+        from sglang.test.simple_eval_common import SingleEvalResult
+
+        def fn(row: dict) -> SingleEvalResult:
+            prompt_messages = [sampler._pack_message(content=row["prompt"], role="user")]
+            try:
+                sampler(prompt_messages)
+            except Exception:
+                pass
+            return SingleEvalResult(score=None)
+
+        results = common.map_with_progress(fn, self.examples, self.num_threads)
+        return common.aggregate_results(results)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 서버 관리
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -267,21 +384,94 @@ def launch_server(args) -> subprocess.Popen:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Cache flush & Warmup
+# ──────────────────────────────────────────────────────────────────────────────
+
+def flush_server_cache(base_url: str, timeout: float = 30.0) -> bool:
+    """Call /flush_cache to release fragmented GPU memory between tasks."""
+    import requests as req_lib
+    try:
+        resp = req_lib.post(f"{base_url}/flush_cache", timeout=timeout)
+        if resp.status_code == 200:
+            print(f"[flush_cache] {resp.text.strip()}")
+            return True
+        print(f"[flush_cache] failed ({resp.status_code}): {resp.text.strip()}")
+        return False
+    except Exception as e:
+        print(f"[flush_cache] error: {e}")
+        return False
+
+
+_WARMUP_MAX_TOKENS = 2048
+_WARMUP_PROMPT = "Hi"
+
+
+def run_warmup(base_url: str, model: str, num_requests: int = 4) -> None:
+    """Send dummy requests to compile all Triton kernel shapes before benchmarking."""
+    if num_requests <= 0:
+        return
+    import concurrent.futures
+    from sglang.test.simple_eval_common import ChatCompletionSampler
+    sampler = ChatCompletionSampler(
+        model=model,
+        max_tokens=_WARMUP_MAX_TOKENS,
+        base_url=f"{base_url}/v1",
+        temperature=0.0,
+    )
+    prompt = [{"role": "user", "content": _WARMUP_PROMPT}]
+    print(f"[warmup] sending {num_requests} dummy requests (max_tokens={_WARMUP_MAX_TOKENS})...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_requests) as ex:
+        futs = [ex.submit(sampler, prompt) for _ in range(num_requests)]
+        concurrent.futures.wait(futs)
+    print("[warmup] done")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 태스크 실행
 # ──────────────────────────────────────────────────────────────────────────────
 
-TASK_API = {"gsm8k": "completion", "humaneval": "chat", "math": "chat"}
-TASK_MAX_TOKENS = {"gsm8k": 512, "humaneval": 512, "math": 1024}
+TASK_API = {
+    "gsm8k": "completion",
+    "humaneval": "chat",
+    "math": "chat",
+    "gpqa": "chat",
+    "mmlu": "chat",
+    "ruler_4k": "chat",
+    "ruler_8k": "chat",
+    "ruler_16k": "chat",
+    "sharegpt": "chat",
+}
+TASK_MAX_TOKENS = {
+    "gsm8k": 512,
+    "humaneval": 512,
+    "math": 1024,
+    "gpqa": 1024,
+    "mmlu": 512,
+    "sharegpt": 512,
+    "ruler_4k": 128,
+    "ruler_8k": 128,
+    "ruler_16k": 128,
+}
+
+GPQA_DEFAULT_URL = "https://openaipublic.blob.core.windows.net/simple-evals/gpqa_diamond.csv"
+MMLU_DEFAULT_URL = "https://openaipublic.blob.core.windows.net/simple-evals/mmlu.csv"
 
 
-def _make_sampler(task: str, base_url: str, model: str):
+def _make_sampler(task: str, base_url: str, model: str,
+                  num_output_blocks: int = 0, block_size: int = 32):
     from sglang.test.simple_eval_common import ChatCompletionSampler, CompletionSampler
-    kw = dict(model=model, max_tokens=TASK_MAX_TOKENS[task],
+    if num_output_blocks > 0:
+        max_tokens = num_output_blocks * block_size
+        extra_body = {"ignore_eos": True}
+    else:
+        max_tokens = TASK_MAX_TOKENS[task]
+        extra_body = None
+    kw = dict(model=model, max_tokens=max_tokens,
               base_url=f"{base_url}/v1", temperature=0.0)
     if TASK_API[task] == "completion":
-        return CompletionSampler(**kw, stop=["Question", "Assistant:", "<|separator|>"])
-    # humaneval: chat API, stop token 없음
-    return ChatCompletionSampler(**kw)
+        return CompletionSampler(**kw, stop=["Question", "Assistant:", "<|separator|>"],
+                                 extra_body=extra_body)
+    return ChatCompletionSampler(**kw, extra_body=extra_body)
 
 
 class RateLimitedSampler:
@@ -312,8 +502,15 @@ def run_task(task: str, base_url: str, model: str,
              num_examples: Optional[int], num_threads: int,
              gsm8k_data_path: Optional[str] = None,
              math_data_path: Optional[str] = None,
-             request_rate: Optional[float] = None) -> Dict:
-    sampler = _make_sampler(task, base_url, model)
+             gpqa_data_path: Optional[str] = None,
+             mmlu_data_path: Optional[str] = None,
+             sharegpt_data_path: Optional[str] = None,
+             request_rate: Optional[float] = None,
+             num_output_blocks: int = 0,
+             block_size: int = 32) -> Dict:
+    sampler = _make_sampler(task, base_url, model,
+                            num_output_blocks=num_output_blocks,
+                            block_size=block_size)
     if request_rate is not None:
         sampler = RateLimitedSampler(sampler, request_rate)
 
@@ -334,6 +531,27 @@ def run_task(task: str, base_url: str, model: str,
     elif task == "math":
         eval_obj = LocalMathEval(num_examples=num_examples, num_threads=num_threads,
                                  data_path=math_data_path)
+    elif task == "gpqa":
+        from sglang.test.simple_eval_gpqa import GPQAEval
+        filename = gpqa_data_path or GPQA_DEFAULT_URL
+        GPQA_TOTAL = 198  # gpqa_diamond.csv has 198 examples
+        gpqa_examples = min(num_examples, GPQA_TOTAL) if num_examples else None
+        eval_obj = GPQAEval(filename=filename, num_examples=gpqa_examples,
+                            num_threads=num_threads)
+    elif task == "mmlu":
+        from sglang.test.simple_eval_mmlu import MMLUEval
+        filename = mmlu_data_path or MMLU_DEFAULT_URL
+        eval_obj = MMLUEval(filename=filename, num_examples=num_examples,
+                            num_threads=num_threads)
+    elif task in ("ruler_4k", "ruler_8k", "ruler_16k"):
+        context_length = int(task.split("_")[1].rstrip("k")) * 1024
+        ruler_examples = num_examples or 500
+        eval_obj = RulerEval(context_length=context_length, num_examples=ruler_examples,
+                             num_threads=num_threads)
+    elif task == "sharegpt":
+        sharegpt_examples = num_examples or 1000
+        eval_obj = ShareGPTEval(num_examples=sharegpt_examples, num_threads=num_threads,
+                                data_path=sharegpt_data_path)
     else:
         raise ValueError(f"Unknown task: {task}")
 
@@ -969,14 +1187,22 @@ def main():
 
     # 벤치마크
     parser.add_argument("--tasks", nargs="+",
-                        choices=["gsm8k", "humaneval", "math"],
+                        choices=["gsm8k", "humaneval", "math", "gpqa", "mmlu",
+                                 "ruler_4k", "ruler_8k", "ruler_16k", "sharegpt"],
                         default=["gsm8k", "humaneval", "math"])
     parser.add_argument("--num-examples", type=int, default=None)
     parser.add_argument("--num-threads", type=int, default=64)
     parser.add_argument("--request-rate", type=float, default=None,
                         help="전체 request 시작 rate(req/s). 미지정 시 기존 closed-loop 방식")
+    parser.add_argument("--warmup", type=int, default=0,
+                        help="벤치마크 전 warmup 요청 수 (0=비활성화)")
+    parser.add_argument("--num-output-blocks", type=int, default=0,
+                        help="고정 출력 블록 수 (0=task별 기본값 사용)")
     parser.add_argument("--gsm8k-data-path", type=str, default=None)
     parser.add_argument("--math-data-path", type=str, default=None)
+    parser.add_argument("--gpqa-data-path", type=str, default=None)
+    parser.add_argument("--mmlu-data-path", type=str, default=None)
+    parser.add_argument("--sharegpt-data-path", type=str, default=None)
 
     # 출력
     parser.add_argument("--output-dir", type=str, default="/tmp/dlm_results")
@@ -1016,6 +1242,9 @@ def main():
             base_url = DEFAULT_URL
             model = args.model_path
 
+        if getattr(args, "warmup", 0) > 0:
+            run_warmup(base_url, model, num_requests=args.warmup)
+
         all_results: Dict[str, Dict] = {}
         step_data: Dict[str, Dict[str, List[int]]] = {}
         latency_data: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
@@ -1046,7 +1275,12 @@ def main():
                 num_examples=args.num_examples, num_threads=args.num_threads,
                 gsm8k_data_path=args.gsm8k_data_path,
                 math_data_path=args.math_data_path,
+                gpqa_data_path=getattr(args, "gpqa_data_path", None),
+                mmlu_data_path=getattr(args, "mmlu_data_path", None),
+                sharegpt_data_path=getattr(args, "sharegpt_data_path", None),
                 request_rate=args.request_rate,
+                num_output_blocks=getattr(args, "num_output_blocks", 0),
+                block_size=args.block_size or 32,
             )
             all_results[task] = metrics
 
@@ -1054,6 +1288,7 @@ def main():
                 "records": [],
                 "raw_forward_calls": [],
                 "block_steps": [],
+                "forward_durations_ms": [],
             }
             raw_forward_calls = step_metrics["raw_forward_calls"]
             block_steps = step_metrics["block_steps"]
