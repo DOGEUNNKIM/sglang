@@ -5,9 +5,9 @@ MODEL_PATH="${MODEL_PATH:-inclusionAI/LLaDA2.0-mini}"
 BLOCK_SIZE="${BLOCK_SIZE:-32}"
 
 ################################
-TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu haregpt}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
+TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu sharegpt}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
 RATES_GSM8K="${RATES_GSM8K:-5 6 7 8 9}"
-RATES_MMLU="${RATES_MMLU:-5 6 7 8 9}"
+RATES_MMLU="${RATES_MMLU:-1 2 3 4}"
 RATES_HUMANEVAL="${RATES_HUMANEVAL:-12 14 16 20 24}" #10 12 14 16 18
 RATES_MATH="${RATES_MATH:-1 2 3 4 5}"
 RATES_GPQA="${RATES_GPQA:-1 2 3 4 5}"
