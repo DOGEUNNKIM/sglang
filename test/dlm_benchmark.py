@@ -461,8 +461,8 @@ TASK_API = {
     "sharegpt": "chat",
 }
 TASK_MAX_TOKENS = {
-    "math": 1024,
-    "gpqa": 1024,
+    "math": 512,
+    "gpqa": 512,
     "gsm8k": 512,
     "humaneval": 512,
     "mmlu": 512,
