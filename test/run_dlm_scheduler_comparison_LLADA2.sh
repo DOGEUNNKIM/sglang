@@ -219,15 +219,17 @@ except Exception:
 }
 
 # _cleanup_benchmark_outputs OUT_DIR TASK
-# Keep the logs needed by dlm_slorate.py and plot_step_dist.py, and drop
-# duplicated/raw benchmark artifacts that make large sweeps fill scratch quickly.
+# Keep only what dlm_slorate.py needs: request_latency_{task}.jsonl and {task}_{model_tag}.json.
+# Everything else is dropped immediately to save scratch space.
 _cleanup_benchmark_outputs() {
     local _out="${1}" _task="${2}"
     local _model_tag="${MODEL_PATH//\//_}"
-    local _summary="${_out}/summary_${_model_tag}.json"
 
-    rm -f "${_out}/steps_${_task}.jsonl"
-    rm -f "${_out}/step_dist_${_model_tag}.png" \
+    rm -f "${_out}/steps_${_task}.jsonl" \
+          "${_out}/batch_latency_${_task}.jsonl" \
+          "${_out}/summary_${_model_tag}.json" \
+          "${_out}/step_stats_${_task}.jsonl" \
+          "${_out}/step_dist_${_model_tag}.png" \
           "${_out}/step_boxplot_${_model_tag}.png" \
           "${_out}/forward_latency_${_model_tag}.png" \
           "${_out}/forward_latency_boxplot_${_model_tag}.png" \
@@ -235,25 +237,6 @@ _cleanup_benchmark_outputs() {
           "${_out}/batch_latency_${_model_tag}.png" \
           "${_out}/phase_sequence_${_model_tag}.png" \
           "${_out}/phase_composition_${_model_tag}.png"
-
-    if [[ -f "${_summary}" ]]; then
-        python3 - "${_summary}" <<'PY'
-import json
-import os
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-tmp = path.with_suffix(path.suffix + ".tmp")
-with path.open() as f:
-    data = json.load(f)
-data.pop("latency_data", None)
-data.pop("step_data", None)
-with tmp.open("w") as f:
-    json.dump(data, f, indent=2)
-os.replace(tmp, path)
-PY
-    fi
 }
 
 trap stop_server EXIT
@@ -293,7 +276,7 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
     for TASK in "${TASKS[@]}"; do
         _rates=($(_task_rates "${TASK}"))
         for RATE in "${_rates[@]}"; do
-        OUT_DIR="${OUTPUT_ROOT}/scheduler_${SCHEDULER}/request_rate_${RATE}"
+        OUT_DIR="${OUTPUT_ROOT}/scheduler_${SCHEDULER}/request_rate_${RATE}/${TASK}"
         mkdir -p "${OUT_DIR}"
 
         {
@@ -386,7 +369,6 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
             PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.6 \
             python "${BENCH_ARGS[@]}"
 
-            [[ -f "${STEP_LOG_FILE}" ]] && cp "${STEP_LOG_FILE}" "${OUT_DIR}/step_stats_${TASK}.jsonl"
             _cleanup_benchmark_outputs "${OUT_DIR}" "${TASK}"
 
             stop_server
@@ -402,7 +384,7 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
         for TASK in "${TASKS[@]}"; do
             _rates=($(_task_rates "${TASK}"))
             _high_rate="${_rates[-1]}"
-            _out="${OUTPUT_ROOT}/scheduler_TTFB/request_rate_${_high_rate}"
+            _out="${OUTPUT_ROOT}/scheduler_TTFB/request_rate_${_high_rate}/${TASK}"
             _val=$(_parse_calib_metric "${_out}" "${TASK}" "p50_ideal_ttfb_ms")
             if [[ -z "${_val}" ]]; then
                 echo "[ideal] WARNING: p50_ideal_ttfb_ms not found for task=${TASK} rate=${_high_rate}" >&2
@@ -419,7 +401,7 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
         for TASK in "${TASKS[@]}"; do
             _rates=($(_task_rates "${TASK}"))
             _high_rate="${_rates[-1]}"
-            _out="${OUTPUT_ROOT}/scheduler_DECODE/request_rate_${_high_rate}"
+            _out="${OUTPUT_ROOT}/scheduler_DECODE/request_rate_${_high_rate}/${TASK}"
             _val=$(_parse_calib_metric "${_out}" "${TASK}" "p50_ideal_tpob_ms")
             if [[ -z "${_val}" ]]; then
                 echo "[ideal] WARNING: p50_ideal_tpob_ms not found for task=${TASK} rate=${_high_rate}" >&2
@@ -463,7 +445,7 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
     for TASK in "${TASKS[@]}"; do
         _rates=($(_task_rates "${TASK}"))
         for RATE in "${_rates[@]}"; do
-            OUT_DIR="${OUTPUT_ROOT}/scheduler_${SCHEDULER}/request_rate_${RATE}"
+            OUT_DIR="${OUTPUT_ROOT}/scheduler_${SCHEDULER}/request_rate_${RATE}/${TASK}"
             SLO_PATH="${OUT_DIR}/slo_rates.json"
 
             echo
@@ -475,6 +457,7 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
                 --tasks "${TASK}" \
                 --slo-config "${SLO_CONFIG_PATH}" \
                 --output-json "${SLO_PATH}"
+            rm -f "${OUT_DIR}/request_latency_${TASK}.jsonl"
         done
     done
 done
@@ -524,7 +507,7 @@ for sched in schedulers:
     summary[sched] = {}
     for task in tasks:
         for rate in task_rate_map.get(task, []):
-            out_dir  = Path(output_root) / f'scheduler_{sched}' / f'request_rate_{rate}'
+            out_dir  = Path(output_root) / f'scheduler_{sched}' / f'request_rate_{rate}' / task
             slo_path = out_dir / 'slo_rates.json'
             if not slo_path.exists():
                 continue
@@ -566,31 +549,6 @@ for sched in schedulers:
                 continue
             print(f'{sched:<10} {task:<12} {rate:>6} {fmt(r[\"score\"]):>8} {fmt(r[\"strict_ttfb\"]):>10} {fmt(r[\"strict_tpob\"]):>10} {fmt(r[\"strict_all\"]):>9} {fmt(r[\"relaxed_ttfb\"]):>10} {fmt(r[\"relaxed_tpob\"]):>10} {fmt(r[\"relaxed_all\"]):>9} {fms(r[\"p99_ttfb_ms\"]):>10} {fms(r[\"p99_tpob_ms\"]):>10}')
 "
-
-echo
-echo "============================================================"
-echo "Step distribution plots"
-echo "============================================================"
-
-MODEL_SLUG="${MODEL_PATH//\//_}"
-
-for SCHEDULER in "${SCHEDULERS[@]}"; do
-    for TASK in "${TASKS[@]}"; do
-        _rates=($(_task_rates "${TASK}"))
-        for RATE in "${_rates[@]}"; do
-            OUT_DIR="${OUTPUT_ROOT}/scheduler_${SCHEDULER}/request_rate_${RATE}"
-
-            echo
-            echo "Step distribution: scheduler=${SCHEDULER}, task=${TASK}, rate=${RATE}"
-            echo "------------------------------------------------------------"
-
-            python test/plot_step_dist.py \
-                --log-dir "${OUT_DIR}" \
-                --tasks "${TASK}" \
-                --output "${OUT_DIR}/step_dist_${MODEL_SLUG}_${TASK}.png"
-        done
-    done
-done
 
 echo
 echo "Done. Results are under ${OUTPUT_ROOT}/scheduler_*/request_rate_*/"
