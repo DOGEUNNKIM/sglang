@@ -6,7 +6,8 @@ BLOCK_SIZE="${BLOCK_SIZE:-32}" #16 32
 MODEL_PATH="${MODEL_PATH:-inclusionAI/LLaDA2.0-mini}" #JetLM/SDAR-8B-Chat inclusionAI/LLaDA2.0-mini
 ######
 
-OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/dlm_results}"
+SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/nvme0/kdg6245}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRATCH_ROOT}/dlm_tb_update_test}"
 WARMUP="${WARMUP:-32}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 REQUEST_RATES=(${REQUEST_RATES:-100})
@@ -25,10 +26,10 @@ STRICT_PROB="${STRICT_PROB:-1}"               # fraction of requests assigned st
 FORWARD_TIME_S="${FORWARD_TIME_S:-0.030}"          # shared fallback (s)
 PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"  # override prefill fwd time (s)
 DECODE_FORWARD_TIME_S="${DECODE_FORWARD_TIME_S:-}"    # override decode fwd time (s)
-CONFIG_PATH="${CONFIG_PATH:-/tmp/dlm_algo_config.yaml}"
-STEP_LOG_FILE="${STEP_LOG_FILE:-/tmp/dlm_step_stats.jsonl}"
-REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-/tmp/dlm_request_latency.jsonl}"
-BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-/tmp/dlm_batch_latency.jsonl}"
+CONFIG_PATH="${CONFIG_PATH:-${OUTPUT_ROOT}/dlm_algo_config.yaml}"
+STEP_LOG_FILE="${STEP_LOG_FILE:-${OUTPUT_ROOT}/dlm_step_stats.jsonl}"
+REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-${OUTPUT_ROOT}/dlm_request_latency.jsonl}"
+BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-${OUTPUT_ROOT}/dlm_batch_latency.jsonl}"
 export STEP_LOG_FILE REQUEST_LATENCY_LOG_FILE BATCH_LATENCY_LOG_FILE
 TP_SIZE="${TP_SIZE:-1}"
 
@@ -154,14 +155,16 @@ stop_server() {
 
 trap stop_server EXIT
 
+SERVER_LOG="${OUTPUT_ROOT}/server_log.txt"
+mkdir -p "${OUTPUT_ROOT}"
+
 for RATE in "${REQUEST_RATES[@]}"; do
     for THREADS in "${NUM_THREADS_SWEEP[@]}"; do
         DLLM_ADMISSION_WINDOW="${THREADS}"
-        OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}/threads_${THREADS}"
-
-        mkdir -p "${OUT_DIR}"
 
     for TASK in "${TASKS[@]}"; do
+        OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}/${TASK}"
+        mkdir -p "${OUT_DIR}"
         echo
         echo "============================================================"
         echo "DLM benchmark: rate=${RATE}, threads=${THREADS}, task=${TASK}, output_dir=${OUT_DIR}"
@@ -194,7 +197,7 @@ for RATE in "${REQUEST_RATES[@]}"; do
 
         _bellman_log_file="${OUT_DIR}/bellman_log_${TASK}.jsonl"
         write_dllm_config "${_strict_ttfb:-}" "${_strict_tpob:-}" "${_release_ttfb:-}" "${_release_tpob:-}" "${_scheduler_mode}"
-        echo "===== request_rate=${RATE} task=${TASK} =====" >> /tmp/dlm_results/run_dlm_slo_server_log.txt
+        echo "===== request_rate=${RATE} task=${TASK} =====" >> "${SERVER_LOG}"
 
         PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.6 \
         python -m sglang.launch_server \
@@ -209,7 +212,7 @@ for RATE in "${REQUEST_RATES[@]}"; do
             --mem-fraction-static 0.95 \
             --cuda-graph-max-bs "${MAX_RUNNING_REQUESTS}" \
             --disable-cuda-graph-padding \
-            >> /tmp/dlm_results/run_dlm_slo_server_log.txt 2>&1 &
+            >> "${SERVER_LOG}" 2>&1 &
             ###############################
             # if long context ruler_4k ruler_8k and ruler_16k
             #--disable-cuda-graph \
@@ -258,17 +261,17 @@ echo "DLM SLO rates"
 echo "============================================================"
 
 for RATE in "${REQUEST_RATES[@]}"; do
-    for THREADS in "${NUM_THREADS_SWEEP[@]}"; do
-        OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}/threads_${THREADS}"
+    for TASK in "${TASKS[@]}"; do
+        OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}/${TASK}"
         SLO_PATH="${OUT_DIR}/slo_rates.json"
 
         echo
-        echo "DLM SLO rate: request_rate=${RATE}, threads=${THREADS}"
+        echo "DLM SLO rate: request_rate=${RATE}, task=${TASK}"
         echo "------------------------------------------------------------"
 
         python test/dlm_slorate.py \
             --latency-dir "${OUT_DIR}" \
-            --tasks "${TASKS[@]}" \
+            --tasks "${TASK}" \
             --output-json "${SLO_PATH}"
     done
 done
@@ -279,16 +282,16 @@ echo "Bellman convergence plots"
 echo "============================================================"
 
 for RATE in "${REQUEST_RATES[@]}"; do
-    for THREADS in "${NUM_THREADS_SWEEP[@]}"; do
-        OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}/threads_${THREADS}"
+    for TASK in "${TASKS[@]}"; do
+        OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}/${TASK}"
 
         echo
-        echo "Bellman convergence: request_rate=${RATE}, threads=${THREADS}"
+        echo "Bellman convergence: request_rate=${RATE}, task=${TASK}"
         echo "------------------------------------------------------------"
 
         python test/plot_bellman_convergence.py \
             --log-dir "${OUT_DIR}" \
-            --tasks "${TASKS[@]}" \
+            --tasks "${TASK}" \
             --output "${OUT_DIR}/bellman_convergence.png"
     done
 done
@@ -301,16 +304,16 @@ echo "============================================================"
 MODEL_SLUG="${MODEL_PATH//\//_}"
 
 for RATE in "${REQUEST_RATES[@]}"; do
-    for THREADS in "${NUM_THREADS_SWEEP[@]}"; do
-        OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}/threads_${THREADS}"
+    for TASK in "${TASKS[@]}"; do
+        OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}/${TASK}"
 
         echo
-        echo "Step distribution: request_rate=${RATE}, threads=${THREADS}"
+        echo "Step distribution: request_rate=${RATE}, task=${TASK}"
         echo "------------------------------------------------------------"
 
         python test/plot_step_dist.py \
             --log-dir "${OUT_DIR}" \
-            --tasks "${TASKS[@]}" \
+            --tasks "${TASK}" \
             --output "${OUT_DIR}/step_dist_${MODEL_SLUG}.png"
     done
 done
