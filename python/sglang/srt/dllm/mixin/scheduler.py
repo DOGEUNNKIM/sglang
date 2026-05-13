@@ -68,13 +68,24 @@ class SchedulerDllmMixin:
             return None
 
         running_bs = len(self.running_batch.reqs)
-        self.policy.calc_priority(self.waiting_queue)
 
         # Create prefill adder with resource constraints
         adder = self._create_dllm_prefill_adder(running_bs)
 
         # Initialize DLLM manager and transfer requests
         self.dllm_manager.init_next_round()
+
+        # Fast path: every active request is mid-block (STAGING_DECODE) and no new
+        # requests are waiting to be admitted.  The batch composition is identical
+        # to the previous step — skip sort / priority / TP-sync / pressure
+        # computation and build the batch directly.
+        if self._is_all_staging_decode():
+            return self._get_new_batch_staging_decode_fast(
+                adder, running_bs, schedule_start_time, schedule_timing
+            )
+
+        self.policy.calc_priority(self.waiting_queue)
+
         phase_start_time = time.perf_counter()
         self._fetch_waiting_reqs()
         schedule_timing["fetch_waiting_s"] = (
@@ -105,11 +116,63 @@ class SchedulerDllmMixin:
         # Create and prepare batch
         batch_phase = self._get_dllm_batch_phase(can_run_list)
         phase_start_time = time.perf_counter()
-        new_batch = self._create_dllm_batch(can_run_list, forward_mode)
+        new_batch = self._create_dllm_batch(can_run_list, ForwardMode.DLLM_EXTEND)
         schedule_timing["batch_build_s"] = time.perf_counter() - phase_start_time
         self._annotate_dllm_batch_metrics(
             new_batch,
             batch_phase=batch_phase,
+            schedule_start_time=schedule_start_time,
+            schedule_timing=schedule_timing,
+        )
+        return new_batch
+
+    def _is_all_staging_decode(self: Scheduler) -> bool:
+        """True when every active request is mid-block STAGING_DECODE and the global
+        waiting queue has no new requests to admit.
+
+        In this state the next batch is identical to the current one, so
+        sort / priority / TP-broadcast / pressure computation can be skipped.
+        """
+        if self.waiting_queue:
+            return False
+        waiting = self.dllm_manager.waiting_queue
+        if not waiting:
+            return False
+        return all(req.dllm_phase == DllmReqPhase.STAGING_DECODE for req in waiting)
+
+    def _get_new_batch_staging_decode_fast(
+        self: Scheduler,
+        adder: PrefillAdder,
+        running_bs: int,
+        schedule_start_time: float,
+        schedule_timing: dict,
+    ) -> Optional[ScheduleBatch]:
+        """Build a decode batch directly when all requests are mid-block STAGING_DECODE.
+
+        Skips sort / priority / TP-sync / pressure computation.
+        Called only when _is_all_staging_decode() is True.
+        """
+        for req in self.dllm_manager.waiting_queue:
+            req.dllm_scheduled_source_phase = req.dllm_phase
+            self._restore_dllm_active_prefix_indices(req)
+            res = adder.add_dllm_staging_req(req)
+            req.dllm_scheduled_exec_phase = req.dllm_phase
+            if res == AddReqResult.NO_TOKEN:
+                break
+
+        can_run_list = adder.can_run_list
+        if not can_run_list:
+            return None
+
+        set_time_batch(can_run_list, "set_forward_entry_time")
+        self._update_state_for_batch(can_run_list, adder, running_bs)
+
+        phase_start_time = time.perf_counter()
+        new_batch = self._create_dllm_batch(can_run_list, ForwardMode.DLLM_EXTEND)
+        schedule_timing["batch_build_s"] = time.perf_counter() - phase_start_time
+        self._annotate_dllm_batch_metrics(
+            new_batch,
+            batch_phase="decode",
             schedule_start_time=schedule_start_time,
             schedule_timing=schedule_timing,
         )
