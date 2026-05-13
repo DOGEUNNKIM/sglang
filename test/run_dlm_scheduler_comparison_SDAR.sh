@@ -5,7 +5,7 @@ MODEL_PATH="${MODEL_PATH:-JetLM/SDAR-8B-Chat}"
 BLOCK_SIZE="${BLOCK_SIZE:-16}"
 
 ################################
-TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu ruler_4k sharegpt})  ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
+TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu ruler_4k sharegpt})  ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k sharegpt
 RATES_GSM8K="${RATES_GSM8K:-200}"
 RATES_MMLU="${RATES_MMLU:-200}"
 RATES_HUMANEVAL="${RATES_HUMANEVAL:-200}"
@@ -16,11 +16,11 @@ RATES_RULER_4K="${RATES_RULER_4K:-200}"
 RATES_RULER_8K="${RATES_RULER_8K:-200}"
 RATES_RULER_16K="${RATES_RULER_16K:-200}"
 RATES_LONGBENCH_V2="${RATES_LONGBENCH_V2:-200}"
-NUM_EXAMPLES_GSM8K="${NUM_EXAMPLES_GSM8K:-}"
-NUM_EXAMPLES_HUMANEVAL="${NUM_EXAMPLES_HUMANEVAL:-}"
-NUM_EXAMPLES_MATH="${NUM_EXAMPLES_MATH:-1000}"
-NUM_EXAMPLES_GPQA="${NUM_EXAMPLES_GPQA:-}"
-NUM_EXAMPLES_MMLU="${NUM_EXAMPLES_MMLU:-1000}"
+NUM_EXAMPLES_GSM8K="${NUM_EXAMPLES_GSM8K:-200}"
+NUM_EXAMPLES_HUMANEVAL="${NUM_EXAMPLES_HUMANEVAL:-200}"
+NUM_EXAMPLES_MATH="${NUM_EXAMPLES_MATH:-200}"
+NUM_EXAMPLES_GPQA="${NUM_EXAMPLES_GPQA:-200}"
+NUM_EXAMPLES_MMLU="${NUM_EXAMPLES_MMLU:-200}"
 NUM_EXAMPLES_SHAREGPT="${NUM_EXAMPLES_SHAREGPT:-200}"
 NUM_EXAMPLES_RULER_4K="${NUM_EXAMPLES_RULER_4K:-200}"
 NUM_EXAMPLES_LONGBENCH_V2="${NUM_EXAMPLES_LONGBENCH_V2:-}"
@@ -30,8 +30,8 @@ SCHEDULERS=(${SCHEDULERS:-FCFS})
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-10.0}"
 RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-20.0}"
 STRICT_PROB="${STRICT_PROB:-1}"
-MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
-WARMUP="${WARMUP:-16}"
+MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-32}"
+WARMUP="${WARMUP:-32}"
 TP_SIZE="${TP_SIZE:-1}"
 FORWARD_TIME_S="${FORWARD_TIME_S:-0.030}"
 ################################
@@ -42,7 +42,7 @@ REQUEST_RATES=(${REQUEST_RATES:-})
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 NUM_THREADS="${NUM_THREADS:-}"
 DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-}"
-PORT="${PORT:-30001}"
+PORT="${PORT:-30020}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 THRESHOLD="${THRESHOLD:-0.95}"
 PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"
@@ -340,7 +340,7 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
                 --cuda-graph-max-bs "${MAX_RUNNING_REQUESTS}" \
                 --disable-cuda-graph-padding \
                 --tp-size "${TP_SIZE}" \
-                --mem-fraction-static 0.95 \
+                --mem-fraction-static 0.90 \
                 >> "${SERVER_LOG}" 2>&1 &
             SERVER_PID=$!
 
@@ -486,18 +486,19 @@ model_tag = '${MODEL_PATH}'.replace('/', '_')
 def _read_bench_metrics(out_dir, task):
     p = Path(out_dir) / f'{task}_{model_tag}.json'
     if not p.exists():
-        return None, None, None, None
+        return None, None, None, None, None
     try:
         d = json.loads(p.read_text())
         ls = d.get('latency_stats', d)
         return (
             d.get('score'),
             d.get('score:std'),
+            d.get('output_throughput_tok_s'),
             ls.get('p99_ttfb_ms'),
             ls.get('p99_tpob_ms'),
         )
     except Exception:
-        return None, None, None, None
+        return None, None, None, None, None
 
 summary = {}
 for sched in schedulers:
@@ -514,10 +515,11 @@ for sched in schedulers:
             if task not in data:
                 continue
             rates_d = data[task].get('rates', {})
-            score, score_std, p99_ttfb, p99_tpob = _read_bench_metrics(out_dir, task)
+            score, score_std, throughput, p99_ttfb, p99_tpob = _read_bench_metrics(out_dir, task)
             summary[sched][rate][task] = {
                 'score':        score,
                 'score_std':    score_std,
+                'throughput_tok_s': throughput,
                 'strict_ttfb':  rates_d.get('strict_ttfb'),
                 'strict_tpob':  rates_d.get('strict_tpob'),
                 'strict_all':   rates_d.get('strict_all'),
@@ -531,7 +533,7 @@ for sched in schedulers:
 Path('${SUMMARY_PATH}').write_text(json.dumps(summary, indent=2))
 print(f'[summary] saved → ${SUMMARY_PATH}')
 
-header = f\"{'Scheduler':<10} {'Task':<12} {'Rate':>6} {'Acc':>8} {'Str-TTFB':>10} {'Str-TPOB':>10} {'Str-All':>9} {'Rel-TTFB':>10} {'Rel-TPOB':>10} {'Rel-All':>9} {'P99-TTFB':>10} {'P99-TPOB':>10}\"
+header = f\"{'Scheduler':<10} {'Task':<12} {'Rate':>6} {'Acc':>8} {'Tok/s':>10} {'Str-TTFB':>10} {'Str-TPOB':>10} {'Str-All':>9} {'Rel-TTFB':>10} {'Rel-TPOB':>10} {'Rel-All':>9} {'P99-TTFB':>10} {'P99-TPOB':>10}\"
 print()
 print(header)
 print('-' * len(header))
@@ -543,7 +545,7 @@ for sched in schedulers:
             r = summary.get(sched, {}).get(rate, {}).get(task)
             if r is None:
                 continue
-            print(f'{sched:<10} {task:<12} {rate:>6} {fmt(r[\"score\"]):>8} {fmt(r[\"strict_ttfb\"]):>10} {fmt(r[\"strict_tpob\"]):>10} {fmt(r[\"strict_all\"]):>9} {fmt(r[\"relaxed_ttfb\"]):>10} {fmt(r[\"relaxed_tpob\"]):>10} {fmt(r[\"relaxed_all\"]):>9} {fms(r[\"p99_ttfb_ms\"]):>10} {fms(r[\"p99_tpob_ms\"]):>10}')
+            print(f'{sched:<10} {task:<12} {rate:>6} {fmt(r[\"score\"]):>8} {fms(r[\"throughput_tok_s\"]):>10} {fmt(r[\"strict_ttfb\"]):>10} {fmt(r[\"strict_tpob\"]):>10} {fmt(r[\"strict_all\"]):>9} {fmt(r[\"relaxed_ttfb\"]):>10} {fmt(r[\"relaxed_tpob\"]):>10} {fmt(r[\"relaxed_all\"]):>9} {fms(r[\"p99_ttfb_ms\"]):>10} {fms(r[\"p99_tpob_ms\"]):>10}')
 "
 
 echo

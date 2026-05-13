@@ -444,11 +444,11 @@ TASK_API = {
 TASK_MAX_TOKENS = {
     "gsm8k": 512,
     "humaneval": 512,
-    "math": 1024,
-    "gpqa": 1024,
+    "math": 512,
+    "gpqa": 512,
     "mmlu": 512,
     "sharegpt": 512,
-    "ruler_4k": 128,
+    "ruler_4k": 512,
     "ruler_8k": 128,
     "ruler_16k": 128,
 }
