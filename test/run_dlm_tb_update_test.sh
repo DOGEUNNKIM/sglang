@@ -10,16 +10,16 @@ SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/nvme0/kdg6245}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRATCH_ROOT}/dlm_tb_update_test}"
 WARMUP="${WARMUP:-32}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
-REQUEST_RATES=(${REQUEST_RATES:-100})
-TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu ruler_4k sharegpt}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
+REQUEST_RATES=(${REQUEST_RATES:-200})
+TASKS=(${TASKS:-ruler_1_4k}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_1k ruler_2k ruler_3k ruler_4k ruler_8k ruler_16k sharegpt
 NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-32}"
 PORT="${PORT:-30000}"
 #DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-100}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 THRESHOLD="${THRESHOLD:-0.95}"
-NUM_THREADS_SWEEP=(${NUM_THREADS_SWEEP:-100})  # sweep values 50 100 150 200
-SCHEDULER="${SCHEDULER:-LST}"               # LST | PREFILL | DECODE | FCFS | SOLA | TTFB
+NUM_THREADS_SWEEP=(${NUM_THREADS_SWEEP:-200})  # sweep values 50 100 150 200
+SCHEDULER="${SCHEDULER:-FCFS}"               # LST | PREFILL | DECODE | FCFS | SOLA | TTFB
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-10.0}"    # strict SLO = multiplier × ideal latency
 RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-20.0}" # release SLO = multiplier × ideal latency
 STRICT_PROB="${STRICT_PROB:-1}"               # fraction of requests assigned strict SLO
@@ -45,6 +45,10 @@ _ideal_ttfb_ms() {
         math)      echo "417.2" ;;
         gpqa)      echo "417.2" ;;
         mmlu)      echo "417.2" ;;
+        ruler_1_4k) echo "417.2" ;;
+        ruler_1k)  echo "417.2" ;;
+        ruler_2k)  echo "417.2" ;;
+        ruler_3k)  echo "417.2" ;;
         ruler_4k)  echo "417.2" ;;
         ruler_8k)  echo "417.2" ;;
         ruler_16k) echo "417.2" ;;
@@ -60,6 +64,10 @@ _ideal_tpob_ms() {
         math)      echo "348.5" ;;
         gpqa)      echo "348.5" ;;
         mmlu)      echo "348.5" ;;
+        ruler_1_4k) echo "348.5" ;;
+        ruler_1k)  echo "348.5" ;;
+        ruler_2k)  echo "348.5" ;;
+        ruler_3k)  echo "348.5" ;;
         ruler_4k)  echo "348.5" ;;
         ruler_8k)  echo "348.5" ;;
         ruler_16k) echo "348.5" ;;
