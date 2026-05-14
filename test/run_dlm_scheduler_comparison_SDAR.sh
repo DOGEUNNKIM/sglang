@@ -5,13 +5,17 @@ MODEL_PATH="${MODEL_PATH:-JetLM/SDAR-8B-Chat}"
 BLOCK_SIZE="${BLOCK_SIZE:-16}"
 
 ################################
-TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu ruler_4k sharegpt})  ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k sharegpt
+TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu ruler_4k sharegpt})  ##### TASK humaneval math gsm8k gpqa mmlu ruler_1k ruler_2k ruler_3k ruler_4k ruler_8k ruler_16k sharegpt
 RATES_GSM8K="${RATES_GSM8K:-200}"
 RATES_MMLU="${RATES_MMLU:-200}"
 RATES_HUMANEVAL="${RATES_HUMANEVAL:-200}"
 RATES_MATH="${RATES_MATH:-200}"
 RATES_GPQA="${RATES_GPQA:-200}"
 RATES_SHAREGPT="${RATES_SHAREGPT:-200}"
+RATES_RULER_1_4K="${RATES_RULER_1_4K:-200}"
+RATES_RULER_1K="${RATES_RULER_1K:-200}"
+RATES_RULER_2K="${RATES_RULER_2K:-200}"
+RATES_RULER_3K="${RATES_RULER_3K:-200}"
 RATES_RULER_4K="${RATES_RULER_4K:-200}"
 RATES_RULER_8K="${RATES_RULER_8K:-200}"
 RATES_RULER_16K="${RATES_RULER_16K:-200}"
@@ -22,6 +26,10 @@ NUM_EXAMPLES_MATH="${NUM_EXAMPLES_MATH:-200}"
 NUM_EXAMPLES_GPQA="${NUM_EXAMPLES_GPQA:-200}"
 NUM_EXAMPLES_MMLU="${NUM_EXAMPLES_MMLU:-200}"
 NUM_EXAMPLES_SHAREGPT="${NUM_EXAMPLES_SHAREGPT:-200}"
+NUM_EXAMPLES_RULER_1_4K="${NUM_EXAMPLES_RULER_1_4K:-200}"
+NUM_EXAMPLES_RULER_1K="${NUM_EXAMPLES_RULER_1K:-200}"
+NUM_EXAMPLES_RULER_2K="${NUM_EXAMPLES_RULER_2K:-200}"
+NUM_EXAMPLES_RULER_3K="${NUM_EXAMPLES_RULER_3K:-200}"
 NUM_EXAMPLES_RULER_4K="${NUM_EXAMPLES_RULER_4K:-200}"
 NUM_EXAMPLES_LONGBENCH_V2="${NUM_EXAMPLES_LONGBENCH_V2:-}"
 NUM_EXAMPLES_RULER_8K="${NUM_EXAMPLES_RULER_8K:-200}"
@@ -64,6 +72,10 @@ _task_dataset_size() {
         gpqa)          echo "198"   ;;
         mmlu)          echo "14042" ;;
         longbench_v2)  echo "503"   ;;
+        ruler_1_4k)    echo "6500"  ;;
+        ruler_1k)      echo "6500"  ;;
+        ruler_2k)      echo "6500"  ;;
+        ruler_3k)      echo "6500"  ;;
         ruler_4k)      echo "6500"  ;;
         ruler_8k)      echo "6500"  ;;
         ruler_16k)     echo "6500"  ;;
@@ -80,6 +92,10 @@ _task_max_examples() {
         gpqa)          echo "${NUM_EXAMPLES_GPQA}" ;;
         mmlu)          echo "${NUM_EXAMPLES_MMLU}" ;;
         longbench_v2)  echo "${NUM_EXAMPLES_LONGBENCH_V2}" ;;
+        ruler_1_4k)    echo "${NUM_EXAMPLES_RULER_1_4K}" ;;
+        ruler_1k)      echo "${NUM_EXAMPLES_RULER_1K}" ;;
+        ruler_2k)      echo "${NUM_EXAMPLES_RULER_2K}" ;;
+        ruler_3k)      echo "${NUM_EXAMPLES_RULER_3K}" ;;
         ruler_4k)      echo "${NUM_EXAMPLES_RULER_4K}" ;;
         ruler_8k)      echo "${NUM_EXAMPLES_RULER_8K}" ;;
         ruler_16k)     echo "${NUM_EXAMPLES_RULER_16K}" ;;
@@ -264,6 +280,10 @@ _task_rates() {
         gpqa)          echo "${RATES_GPQA}" ;;
         mmlu)          echo "${RATES_MMLU}" ;;
         longbench_v2)  echo "${RATES_LONGBENCH_V2}" ;;
+        ruler_1_4k)    echo "${RATES_RULER_1_4K}" ;;
+        ruler_1k)      echo "${RATES_RULER_1K}" ;;
+        ruler_2k)      echo "${RATES_RULER_2K}" ;;
+        ruler_3k)      echo "${RATES_RULER_3K}" ;;
         ruler_4k)      echo "${RATES_RULER_4K}" ;;
         ruler_8k)      echo "${RATES_RULER_8K}" ;;
         ruler_16k)     echo "${RATES_RULER_16K}" ;;
@@ -475,6 +495,10 @@ task_rate_map = {
     'gpqa':         '${RATES_GPQA}'.split(),
     'mmlu':         '${RATES_MMLU}'.split(),
     'longbench_v2': '${RATES_LONGBENCH_V2}'.split(),
+    'ruler_1_4k':   '${RATES_RULER_1_4K}'.split(),
+    'ruler_1k':     '${RATES_RULER_1K}'.split(),
+    'ruler_2k':     '${RATES_RULER_2K}'.split(),
+    'ruler_3k':     '${RATES_RULER_3K}'.split(),
     'ruler_4k':     '${RATES_RULER_4K}'.split(),
     'ruler_8k':     '${RATES_RULER_8K}'.split(),
     'ruler_16k':    '${RATES_RULER_16K}'.split(),

@@ -239,7 +239,10 @@ RULER_DATASET_ID = "simonjegou/ruler"
 class RulerEval:
     """Evaluate on RULER (NIAH + related subtasks) at a fixed context length."""
 
-    def __init__(self, context_length: int, num_examples: Optional[int], num_threads: int):
+    _CHARS_PER_TOKEN = 4
+
+    def __init__(self, context_length: int, num_examples: Optional[int], num_threads: int,
+                 truncate_to_tokens: Optional[int] = None):
         try:
             from datasets import load_dataset
         except ImportError:
@@ -251,14 +254,73 @@ class RulerEval:
             examples = random.Random(0).sample(examples, min(num_examples, len(examples)))
         self.examples = examples
         self.num_threads = num_threads
+        self.truncate_chars = truncate_to_tokens * self._CHARS_PER_TOKEN if truncate_to_tokens else None
 
     def __call__(self, sampler) -> object:
         from sglang.test import simple_eval_common as common
         from sglang.test.simple_eval_common import SingleEvalResult
 
         def fn(row: dict) -> SingleEvalResult:
+            context = row['context']
+            if self.truncate_chars is not None:
+                context = context[:self.truncate_chars]
             prompt_messages = [sampler._pack_message(
-                content=f"{row['context']}\n\n{row['question']}",
+                content=f"{context}\n\n{row['question']}",
+                role="user",
+            )]
+            try:
+                response_text = sampler(prompt_messages) or ""
+            except Exception:
+                response_text = ""
+            gold_answers = row["answer"]
+            score = float(any(ans.lower() in response_text.lower() for ans in gold_answers))
+            return SingleEvalResult(score=score)
+
+        results = common.map_with_progress(fn, self.examples, self.num_threads)
+        return common.aggregate_results(results, default_stats=("mean", "std"))
+
+
+class RulerMixedEval:
+    """RULER with equal-sized groups of 1k/2k/3k/4k contexts (all from 4k dataset)."""
+
+    _CHARS_PER_TOKEN = 4
+    _CONTEXT_LENGTHS_K = [1, 2, 3, 4]
+
+    def __init__(self, num_examples: int, num_threads: int):
+        try:
+            from datasets import load_dataset
+        except ImportError:
+            raise ImportError("pip install datasets  # required for ruler tasks")
+
+        ds = load_dataset(RULER_DATASET_ID, "4096", split="test")
+        all_examples = [dict(row) for row in ds]
+
+        n_groups = len(self._CONTEXT_LENGTHS_K)
+        per_group = num_examples // n_groups
+        sampled = random.Random(0).sample(all_examples, min(per_group * n_groups, len(all_examples)))
+
+        self.examples = []
+        for i, ctx_k in enumerate(self._CONTEXT_LENGTHS_K):
+            group = sampled[i * per_group : (i + 1) * per_group]
+            truncate_chars = ctx_k * 1024 * self._CHARS_PER_TOKEN if ctx_k < 4 else None
+            for ex in group:
+                ex = dict(ex)
+                ex['_truncate_chars'] = truncate_chars
+                self.examples.append(ex)
+
+        random.Random(42).shuffle(self.examples)
+        self.num_threads = num_threads
+
+    def __call__(self, sampler) -> object:
+        from sglang.test import simple_eval_common as common
+        from sglang.test.simple_eval_common import SingleEvalResult
+
+        def fn(row: dict) -> SingleEvalResult:
+            context = row['context']
+            if row.get('_truncate_chars') is not None:
+                context = context[:row['_truncate_chars']]
+            prompt_messages = [sampler._pack_message(
+                content=f"{context}\n\n{row['question']}",
                 role="user",
             )]
             try:
@@ -436,21 +498,31 @@ TASK_API = {
     "math": "chat",
     "gpqa": "chat",
     "mmlu": "chat",
+    "ruler_1_4k": "chat",
+    "ruler_1k": "chat",
+    "ruler_2k": "chat",
+    "ruler_3k": "chat",
     "ruler_4k": "chat",
     "ruler_8k": "chat",
     "ruler_16k": "chat",
     "sharegpt": "chat",
 }
 TASK_MAX_TOKENS = {
-    "gsm8k": 512,
-    "humaneval": 512,
     "math": 512,
     "gpqa": 512,
+    "gsm8k": 512,
+    "humaneval": 512,
     "mmlu": 512,
+    "longbench_v2": 512,
     "sharegpt": 512,
+    "ruler_1_4k": 512,
+    "ruler_1k": 512,
+    "ruler_2k": 512,
+    "ruler_3k": 512,
     "ruler_4k": 512,
-    "ruler_8k": 128,
-    "ruler_16k": 128,
+    "ruler_8k": 512,
+    "ruler_16k": 512,
+    "longbench_v2": 512,
 }
 
 GPQA_DEFAULT_URL = "https://openaipublic.blob.core.windows.net/simple-evals/gpqa_diamond.csv"
@@ -543,11 +615,20 @@ def run_task(task: str, base_url: str, model: str,
         filename = mmlu_data_path or MMLU_DEFAULT_URL
         eval_obj = MMLUEval(filename=filename, num_examples=num_examples,
                             num_threads=num_threads)
-    elif task in ("ruler_4k", "ruler_8k", "ruler_16k"):
-        context_length = int(task.split("_")[1].rstrip("k")) * 1024
+    elif task == "ruler_1_4k":
+        ruler_examples = num_examples or 200
+        eval_obj = RulerMixedEval(num_examples=ruler_examples, num_threads=num_threads)
+    elif task in ("ruler_1k", "ruler_2k", "ruler_3k", "ruler_4k", "ruler_8k", "ruler_16k"):
+        target_tokens = int(task.split("_")[1].rstrip("k")) * 1024
+        if target_tokens < 4096:
+            context_length = 4096
+            truncate_to_tokens = target_tokens
+        else:
+            context_length = target_tokens
+            truncate_to_tokens = None
         ruler_examples = num_examples or 500
         eval_obj = RulerEval(context_length=context_length, num_examples=ruler_examples,
-                             num_threads=num_threads)
+                             num_threads=num_threads, truncate_to_tokens=truncate_to_tokens)
     elif task == "sharegpt":
         sharegpt_examples = num_examples or 1000
         eval_obj = ShareGPTEval(num_examples=sharegpt_examples, num_threads=num_threads,
@@ -1188,6 +1269,8 @@ def main():
     # 벤치마크
     parser.add_argument("--tasks", nargs="+",
                         choices=["gsm8k", "humaneval", "math", "gpqa", "mmlu",
+                                 "ruler_1_4k",
+                                 "ruler_1k", "ruler_2k", "ruler_3k",
                                  "ruler_4k", "ruler_8k", "ruler_16k", "sharegpt"],
                         default=["gsm8k", "humaneval", "math"])
     parser.add_argument("--num-examples", type=int, default=None)
