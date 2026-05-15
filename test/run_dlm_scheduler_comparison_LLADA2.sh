@@ -598,5 +598,54 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
 done
 
 echo
+echo "============================================================"
+echo "Throughput Summary"
+echo "============================================================"
+python3 -c "
+import json
+from pathlib import Path
+
+output_root = '${OUTPUT_ROOT}'
+schedulers = '${SCHEDULERS[*]}'.split()
+tasks = '${TASKS[*]}'.split()
+model_tag = '${MODEL_PATH}'.replace('/', '_')
+task_rate_map = {
+    'gsm8k':        '${RATES_GSM8K}'.split(),
+    'humaneval':    '${RATES_HUMANEVAL}'.split(),
+    'math':         '${RATES_MATH}'.split(),
+    'gpqa':         '${RATES_GPQA}'.split(),
+    'mmlu':         '${RATES_MMLU}'.split(),
+    'longbench_v2': '${RATES_LONGBENCH_V2}'.split(),
+    'ruler_1_4k':   '${RATES_RULER_1_4K}'.split(),
+    'ruler_1k':     '${RATES_RULER_1K}'.split(),
+    'ruler_2k':     '${RATES_RULER_2K}'.split(),
+    'ruler_3k':     '${RATES_RULER_3K}'.split(),
+    'ruler_4k':     '${RATES_RULER_4K}'.split(),
+    'ruler_8k':     '${RATES_RULER_8K}'.split(),
+    'ruler_16k':    '${RATES_RULER_16K}'.split(),
+    'sharegpt':     '${RATES_SHAREGPT}'.split(),
+}
+
+print(f\"{'Scheduler':<10} {'Task':<14} {'Rate':>6} {'Score':>8} {'Tok/s':>10}\")
+print('-' * 52)
+for sched in schedulers:
+    for task in tasks:
+        for rate in task_rate_map.get(task, []):
+            p = Path(output_root) / f'scheduler_{sched}' / f'request_rate_{rate}' / f'{task}_{model_tag}.json'
+            if not p.exists():
+                print(f'{sched:<10} {task:<14} {rate:>6} {\"N/A\":>8} {\"N/A\":>10}')
+                continue
+            try:
+                d = json.loads(p.read_text())
+                score = d.get('score')
+                tput  = d.get('output_throughput_tok_s')
+                s = f'{score:.4f}' if score is not None else 'N/A'
+                t = f'{tput:.1f}' if tput is not None else 'N/A'
+                print(f'{sched:<10} {task:<14} {rate:>6} {s:>8} {t:>10}')
+            except Exception as e:
+                print(f'{sched:<10} {task:<14} {rate:>6} {\"ERR\":>8} {str(e)[:10]:>10}')
+"
+
+echo
 echo "Done. Results are under ${OUTPUT_ROOT}/scheduler_*/request_rate_*/"
 echo "Consolidated SLO summary: ${SUMMARY_PATH}"

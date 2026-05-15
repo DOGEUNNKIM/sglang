@@ -2,10 +2,10 @@
 set -euo pipefail
 
 MODEL_PATH="${MODEL_PATH:-JetLM/SDAR-8B-Chat}"
-BLOCK_SIZE="${BLOCK_SIZE:-16}"
+BLOCK_SIZE="${BLOCK_SIZE:-32}"
 
 ################################
-TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu ruler_4k sharegpt})  ##### TASK humaneval math gsm8k gpqa mmlu ruler_1k ruler_2k ruler_3k ruler_4k ruler_8k ruler_16k sharegpt
+TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu sharegpt ruler_1k ruler_2k ruler_3k ruler_4k ruler_1_4k})  ##### TASK humaneval math gsm8k gpqa mmlu ruler_1k ruler_2k ruler_3k ruler_4k ruler_8k ruler_16k sharegpt
 RATES_GSM8K="${RATES_GSM8K:-200}"
 RATES_MMLU="${RATES_MMLU:-200}"
 RATES_HUMANEVAL="${RATES_HUMANEVAL:-200}"
@@ -52,7 +52,7 @@ NUM_THREADS="${NUM_THREADS:-}"
 DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-}"
 PORT="${PORT:-30020}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
-THRESHOLD="${THRESHOLD:-0.95}"
+THRESHOLD="${THRESHOLD:-0.85}"
 PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"
 DECODE_FORWARD_TIME_S="${DECODE_FORWARD_TIME_S:-}"
 CONFIG_PATH="${CONFIG_PATH:-${OUTPUT_ROOT}/dlm_algo_config_sched_cmp_SDAR_baseline.yaml}"
@@ -360,8 +360,12 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
                 --cuda-graph-max-bs "${MAX_RUNNING_REQUESTS}" \
                 --disable-cuda-graph-padding \
                 --tp-size "${TP_SIZE}" \
-                --mem-fraction-static 0.90 \
+                --mem-fraction-static 0.95 \
                 >> "${SERVER_LOG}" 2>&1 &
+                ###############################
+                # if long context ruler_4k ruler_8k and ruler_16k
+                # --disable-cuda-graph \
+                ###############################
             SERVER_PID=$!
 
             echo "[server] pid=${SERVER_PID}, waiting for ${BASE_URL}/health"
@@ -596,6 +600,55 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
         done
     done
 done
+
+echo
+echo "============================================================"
+echo "Throughput Summary"
+echo "============================================================"
+python3 -c "
+import json
+from pathlib import Path
+
+output_root = '${OUTPUT_ROOT}'
+schedulers = '${SCHEDULERS[*]}'.split()
+tasks = '${TASKS[*]}'.split()
+model_tag = '${MODEL_PATH}'.replace('/', '_')
+task_rate_map = {
+    'gsm8k':        '${RATES_GSM8K}'.split(),
+    'humaneval':    '${RATES_HUMANEVAL}'.split(),
+    'math':         '${RATES_MATH}'.split(),
+    'gpqa':         '${RATES_GPQA}'.split(),
+    'mmlu':         '${RATES_MMLU}'.split(),
+    'longbench_v2': '${RATES_LONGBENCH_V2}'.split(),
+    'ruler_1_4k':   '${RATES_RULER_1_4K}'.split(),
+    'ruler_1k':     '${RATES_RULER_1K}'.split(),
+    'ruler_2k':     '${RATES_RULER_2K}'.split(),
+    'ruler_3k':     '${RATES_RULER_3K}'.split(),
+    'ruler_4k':     '${RATES_RULER_4K}'.split(),
+    'ruler_8k':     '${RATES_RULER_8K}'.split(),
+    'ruler_16k':    '${RATES_RULER_16K}'.split(),
+    'sharegpt':     '${RATES_SHAREGPT}'.split(),
+}
+
+print(f\"{'Scheduler':<10} {'Task':<14} {'Rate':>6} {'Score':>8} {'Tok/s':>10}\")
+print('-' * 52)
+for sched in schedulers:
+    for task in tasks:
+        for rate in task_rate_map.get(task, []):
+            p = Path(output_root) / f'scheduler_{sched}' / f'request_rate_{rate}' / f'{task}_{model_tag}.json'
+            if not p.exists():
+                print(f'{sched:<10} {task:<14} {rate:>6} {\"N/A\":>8} {\"N/A\":>10}')
+                continue
+            try:
+                d = json.loads(p.read_text())
+                score = d.get('score')
+                tput  = d.get('output_throughput_tok_s')
+                s = f'{score:.4f}' if score is not None else 'N/A'
+                t = f'{tput:.1f}' if tput is not None else 'N/A'
+                print(f'{sched:<10} {task:<14} {rate:>6} {s:>8} {t:>10}')
+            except Exception as e:
+                print(f'{sched:<10} {task:<14} {rate:>6} {\"ERR\":>8} {str(e)[:10]:>10}')
+"
 
 echo
 echo "Done. Results are under ${OUTPUT_ROOT}/scheduler_*/request_rate_*/"
