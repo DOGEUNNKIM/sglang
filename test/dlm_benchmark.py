@@ -2610,7 +2610,7 @@ def main():
                         help="HuggingFace 모델 경로 → 서버 자동 실행")
     parser.add_argument("--tp-size", type=int, default=1)
     parser.add_argument("--mem-fraction-static", type=float, default=0.88)
-    parser.add_argument("--max-running-requests", type=int, default=4)
+    parser.add_argument("--max-running-requests", type=int, default=32)
     parser.add_argument("--threshold", type=float, default=0.95,
                         help="LowConfidence unmasking threshold")
     parser.add_argument("--disable-cuda-graph", action="store_true",

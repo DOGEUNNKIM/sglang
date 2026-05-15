@@ -48,6 +48,9 @@ class SchedulerDllmMixin:
         self.dllm_decode_block_count = 0
         self.dllm_decode_batch_time_sum = 0.0
         self.dllm_mixed_prefill_decode_batch_time_sum = 0.0
+        # Cached batch from the last pure-STAGING_DECODE step; used to skip
+        # alloc_for_extend() when the batch composition is unchanged.
+        self._prev_staging_decode_batch = None
 
     def get_new_batch_dllm(self: Scheduler) -> Optional[ScheduleBatch]:
         """Generate a new batch for DLLM (Diffusion LLM) scheduling."""
@@ -83,6 +86,10 @@ class SchedulerDllmMixin:
             return self._get_new_batch_staging_decode_fast(
                 adder, running_bs, schedule_start_time, schedule_timing
             )
+
+        # Batch composition changed (new admissions, block completions, etc.) —
+        # the cached staging-decode batch tensors are no longer valid.
+        self._prev_staging_decode_batch = None
 
         self.policy.calc_priority(self.waiting_queue)
 
@@ -168,8 +175,25 @@ class SchedulerDllmMixin:
         self._update_state_for_batch(can_run_list, adder, running_bs)
 
         phase_start_time = time.perf_counter()
-        new_batch = self._create_dllm_batch(can_run_list, ForwardMode.DLLM_EXTEND)
+        # Reuse the previous batch's invariant tensors when the batch composition
+        # hasn't changed and every request still has an active block (same block
+        # being unmasked).  This skips alloc_for_extend() — in particular the
+        # write_cache_indices Triton kernel — since KV slot assignments are
+        # unchanged while a block's unmasking is in progress.
+        prev = self._prev_staging_decode_batch
+        can_fast_prep = (
+            prev is not None
+            and len(prev.reqs) == len(can_run_list)
+            and all(p.rid == c.rid for p, c in zip(prev.reqs, can_run_list))
+            and all(req.has_dllm_active_block() for req in can_run_list)
+        )
+        new_batch = self._create_dllm_batch(
+            can_run_list,
+            ForwardMode.DLLM_EXTEND,
+            staging_decode_prev_batch=prev if can_fast_prep else None,
+        )
         schedule_timing["batch_build_s"] = time.perf_counter() - phase_start_time
+        self._prev_staging_decode_batch = new_batch
         self._annotate_dllm_batch_metrics(
             new_batch,
             batch_phase="decode",
@@ -1163,9 +1187,17 @@ class SchedulerDllmMixin:
         self.running_bs = len(self.running_batch.reqs)
 
     def _create_dllm_batch(
-        self: Scheduler, can_run_list: List[Req], forward_mode: ForwardMode
+        self: Scheduler,
+        can_run_list: List[Req],
+        forward_mode: ForwardMode,
+        staging_decode_prev_batch: Optional[ScheduleBatch] = None,
     ) -> ScheduleBatch:
-        """Create and prepare a new DLLM batch."""
+        """Create and prepare a new DLLM batch.
+
+        When staging_decode_prev_batch is provided, uses the fast-path
+        prepare_for_dllm_staging_decode() which reuses invariant tensors
+        from the previous step instead of calling the full alloc_for_extend().
+        """
         new_batch = ScheduleBatch.init_new(
             can_run_list,
             self.req_to_token_pool,
@@ -1176,7 +1208,10 @@ class SchedulerDllmMixin:
             self.spec_algorithm,
             dllm_config=self.dllm_config,
         )
-        new_batch.prepare_for_extend()
+        if staging_decode_prev_batch is not None:
+            new_batch.prepare_for_dllm_staging_decode(staging_decode_prev_batch)
+        else:
+            new_batch.prepare_for_extend()
         new_batch.forward_mode = forward_mode
         new_batch.decoding_reqs = None
 

@@ -5,7 +5,7 @@ set -euo pipefail
 
 ###### model config ######
 BLOCK_SIZE="${BLOCK_SIZE:-32}" # 16 SDAR 는 config.py도 변경 필요
-MODEL_PATH="${MODEL_PATH:-inclusionAI/LLaDA2.0-mini}" #JetLM/SDAR-8B-Chat
+MODEL_PATH="${MODEL_PATH:-JetLM/SDAR-8B-Chat}" #JetLM/SDAR-8B-Chat
 ######
 
 SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/nvme0/kdg6245}"
@@ -21,7 +21,7 @@ BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 TP_SIZE="${TP_SIZE:-1}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 
-THRESHOLD="${THRESHOLD:-0.95}"
+THRESHOLD="${THRESHOLD:-0.85}"
 FORWARD_TIME_S="${FORWARD_TIME_S:-0.030}"
 CONFIG_PATH="${CONFIG_PATH:-${OUTPUT_ROOT}/dlm_algo_config.yaml}"
 

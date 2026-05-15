@@ -3,7 +3,7 @@ set -euo pipefail
 
 ###### model config ######
 BLOCK_SIZE="${BLOCK_SIZE:-32}" #16 32
-MODEL_PATH="${MODEL_PATH:-inclusionAI/LLaDA2.0-mini}" #JetLM/SDAR-8B-Chat inclusionAI/LLaDA2.0-mini
+MODEL_PATH="${MODEL_PATH:-JetLM/SDAR-8B-Chat}" #JetLM/SDAR-8B-Chat inclusionAI/LLaDA2.0-mini
 ######
 
 SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/nvme0/kdg6245}"
@@ -11,13 +11,13 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRATCH_ROOT}/dlm_tb_update_test}"
 WARMUP="${WARMUP:-32}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 REQUEST_RATES=(${REQUEST_RATES:-200})
-TASKS=(${TASKS:-ruler_1_4k}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_1k ruler_2k ruler_3k ruler_4k ruler_8k ruler_16k sharegpt
+TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu sharegpt ruler_1k ruler_2k ruler_3k ruler_4k ruler_1_4k}) ##### TASK humaneval math gsm8k gpqa mmlu sharegpt ruler_1k ruler_2k ruler_3k ruler_4k ruler_1_4k
 NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-32}"
 PORT="${PORT:-30000}"
 #DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-100}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
-THRESHOLD="${THRESHOLD:-0.95}"
+THRESHOLD="${THRESHOLD:-0.85}"
 NUM_THREADS_SWEEP=(${NUM_THREADS_SWEEP:-200})  # sweep values 50 100 150 200
 SCHEDULER="${SCHEDULER:-FCFS}"               # LST | PREFILL | DECODE | FCFS | SOLA | TTFB
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-10.0}"    # strict SLO = multiplier × ideal latency
@@ -223,7 +223,7 @@ for RATE in "${REQUEST_RATES[@]}"; do
             >> "${SERVER_LOG}" 2>&1 &
             ###############################
             # if long context ruler_4k ruler_8k and ruler_16k
-            #--disable-cuda-graph \
+            # --disable-cuda-graph \
             ###############################
         SERVER_PID=$!
 
@@ -325,6 +325,38 @@ for RATE in "${REQUEST_RATES[@]}"; do
             --output "${OUT_DIR}/step_dist_${MODEL_SLUG}.png"
     done
 done
+
+echo
+echo "============================================================"
+echo "Throughput Summary"
+echo "============================================================"
+python3 -c "
+import json
+from pathlib import Path
+
+output_root = '${OUTPUT_ROOT}'
+rates = '${REQUEST_RATES[*]}'.split()
+tasks = '${TASKS[*]}'.split()
+model_tag = '${MODEL_PATH}'.replace('/', '_')
+
+print(f\"{'Task':<14} {'Rate':>6} {'Score':>8} {'Tok/s':>10}\")
+print('-' * 42)
+for rate in rates:
+    for task in tasks:
+        p = Path(output_root) / f'request_rate_{rate}' / task / f'{task}_{model_tag}.json'
+        if not p.exists():
+            print(f'{task:<14} {rate:>6} {\"N/A\":>8} {\"N/A\":>10}')
+            continue
+        try:
+            d = json.loads(p.read_text())
+            score = d.get('score')
+            tput  = d.get('output_throughput_tok_s')
+            s = f'{score:.4f}' if score is not None else 'N/A'
+            t = f'{tput:.1f}' if tput is not None else 'N/A'
+            print(f'{task:<14} {rate:>6} {s:>8} {t:>10}')
+        except Exception as e:
+            print(f'{task:<14} {rate:>6} {\"ERR\":>8} {str(e)[:10]:>10}')
+"
 
 echo
 echo "Done. Results are under ${OUTPUT_ROOT}/request_rate_*/threads_*/"

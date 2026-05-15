@@ -1855,6 +1855,55 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             self.model_config.vocab_size,
         )
 
+    def prepare_for_dllm_staging_decode(self, prev_batch: "ScheduleBatch") -> None:
+        """Fast-path prepare for pure STAGING_DECODE steps.
+
+        When all requests are mid-block (same block across consecutive unmask steps),
+        seq_lens / prefix_lens / out_cache_loc / req_pool_indices are invariant.
+        Only input_ids changes as masks are progressively replaced with unmasked tokens.
+        Skips alloc_for_extend() (including the write_cache_indices Triton kernel) by
+        reusing tensors cached from the previous scheduling step.
+        """
+        self.forward_mode = ForwardMode.DLLM_EXTEND
+
+        # Rebuild only input_ids from the updated (partially unmasked) fill_ids.
+        _pin = is_pin_memory_available(self.device)
+        input_ids = [r.fill_ids[len(r.prefix_indices) :] for r in self.reqs]
+        self.input_ids = torch.tensor(
+            list(chain.from_iterable(input_ids)),
+            dtype=torch.int64,
+            pin_memory=_pin,
+        ).to(self.device, non_blocking=True)
+
+        # Reuse all invariant tensors — these do not change while a block is
+        # being unmasked (same KV slots, same sequence lengths, same prefix).
+        self.seq_lens = prev_batch.seq_lens
+        self.seq_lens_cpu = prev_batch.seq_lens_cpu
+        self.orig_seq_lens = prev_batch.orig_seq_lens
+        self.out_cache_loc = prev_batch.out_cache_loc
+        self.req_pool_indices = prev_batch.req_pool_indices
+        self.extend_num_tokens = prev_batch.extend_num_tokens
+        self.prefix_lens = prev_batch.prefix_lens
+        self.extend_lens = prev_batch.extend_lens
+        self.seq_lens_sum = prev_batch.seq_lens_sum
+        # sampling_info: reused because req set and sampling params are unchanged
+        # across consecutive unmask steps. Safe for DLM eval (no grammar, no
+        # per-step sampling state mutation), but callers must not mutate this.
+        self.sampling_info = prev_batch.sampling_info
+
+        # Fields set by prepare_for_extend() that are unused in text-only DLLM
+        # forward but must exist to avoid AttributeError in generic code paths.
+        self.input_embeds = None
+        self.replace_embeds = None
+        self.replace_positions = None
+        self.multimodal_inputs = []
+        self.token_type_ids = None
+        self.return_pooled_hidden_states = False
+        # extend_logprob_start_lens: safe zero-fill; only meaningful when
+        # return_logprob=True, which DLLM eval does not enable.
+        self.extend_logprob_start_lens = [0] * len(self.reqs)
+        self.extend_input_logprob_token_ids = None
+
     def _mamba_radix_cache_v2_req_prepare_for_extend(
         self,
         req: Req,
