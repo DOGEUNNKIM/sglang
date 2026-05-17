@@ -360,8 +360,13 @@ Phase 1 — benchmark collection (iterates over RATE × THREADS × TASK)
         6. Stop server
 
 Phase 2 — SLO rate computation
-  for RATE, TASK:
-    dlm_slorate.py --latency-dir OUT_DIR -> OUT_DIR/slo_rates.json
+  for TASK:
+    dlm_slorate.py --latency-dir <all per-rate OUT_DIRs for this task>
+                   --strict-factor STRICT_MULTIPLIER --relaxed-factor RELEASE_MULTIPLIER
+                   -> OUTPUT_ROOT/slo_rates_<task>.json   (combined across all rates)
+    for RATE:
+      dlm_slorate.py --latency-dir OUT_DIR  (single rate)
+                     -> OUT_DIR/slo_rates.json
 
 Phase 3 — Bellman convergence plots
   for RATE, TASK:
@@ -379,6 +384,7 @@ Phase 4 — Throughput summary (stdout)
 /mnt/nvme0/kdg6245/dlm_tb_update_test/
   server_log.txt
   dlm_algo_config.yaml
+  slo_rates_<task>.json             <- combined SLO rates across all REQUEST_RATES for this task
 
   request_rate_<R>/
     <task>/
@@ -389,7 +395,7 @@ Phase 4 — Throughput summary (stdout)
       steps_<task>.jsonl
       step_stats_<task>.jsonl
       bellman_log_<task>.jsonl
-      slo_rates.json
+      slo_rates.json                <- SLO rates for this rate only
       bellman_convergence.png
 ```
 

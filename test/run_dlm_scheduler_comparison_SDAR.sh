@@ -6,14 +6,14 @@ BLOCK_SIZE="${BLOCK_SIZE:-32}"
 
 ################################
 TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu sharegpt ruler_4k}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
-# TP = 1일때
-RATES_GSM8K="${RATES_GSM8K:-3 4 5 6}" # 결정
-RATES_MMLU="${RATES_MMLU:-1 1.2 1.4 1.6}" # 결정
-RATES_HUMANEVAL="${RATES_HUMANEVAL:-8 10 12 14}" # 결정
-RATES_MATH="${RATES_MATH:-1 1.2 1.4 1.6}" # 결정
-RATES_GPQA="${RATES_GPQA:-0.8 0.9 1.0 1.1}" # 결정
-RATES_SHAREGPT="${RATES_SHAREGPT:-2 2.5 3 3.5}"
-RATES_RULER_4K="${RATES_RULER_4K:-2 2.5 3 3.5}" 
+# TP = 1 batch = 32 block_size = 32 일때
+RATES_GSM8K="${RATES_GSM8K:-3 4 5 6}" # 완전 결정
+RATES_MMLU="${RATES_MMLU:-1 1.2 1.4 1.6}" # 완전 결정
+RATES_HUMANEVAL="${RATES_HUMANEVAL:-4 6 8 10}" # 완전 결정
+RATES_MATH="${RATES_MATH:-1 1.2 1.4 1.6}" # 완전 결정
+RATES_GPQA="${RATES_GPQA:-0.6 0.8 1.0 1.2}" # 완전 결정
+RATES_SHAREGPT="${RATES_SHAREGPT:-1.5 2 2.5 3}" # 완전 결정
+RATES_RULER_4K="${RATES_RULER_4K:-2 2.5 3 3.5}" # 완전 결정
 # TP = 2일때
 #RATES_GSM8K="${RATES_GSM8K:-4 4.5 5 5.5}" # 결정
 #RATES_MMLU="${RATES_MMLU:-1 1.2 1.4 1.6}" # 결정

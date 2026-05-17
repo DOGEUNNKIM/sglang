@@ -1,31 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-###### model config ######
-BLOCK_SIZE="${BLOCK_SIZE:-32}" #16 32
+###### hyper parameter ######
+BLOCK_SIZE="${BLOCK_SIZE:-32}" #32
 MODEL_PATH="${MODEL_PATH:-JetLM/SDAR-8B-Chat}" #JetLM/SDAR-8B-Chat inclusionAI/LLaDA2.0-mini
-######
+WARMUP="${WARMUP:-32}"
+MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-32}"
+NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
+REQUEST_RATES=(${REQUEST_RATES:-0.25 0.5 1 1.5})
+TASKS=(${TASKS:-gpqa}) ##### TASK humaneval math gsm8k gpqa mmlu sharegpt ruler_1k ruler_2k ruler_3k ruler_4k ruler_1_4k
+SCHEDULER="${SCHEDULER:-FCFS}"               # LST | PREFILL | DECODE | FCFS | SOLA | TTFB
+NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
+NUM_THREADS_SWEEP=(${NUM_THREADS_SWEEP:-200})
+###### hyper parameter ######
 
 SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/nvme0/kdg6245}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRATCH_ROOT}/dlm_tb_update_test}"
-WARMUP="${WARMUP:-32}"
-NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
-REQUEST_RATES=(${REQUEST_RATES:-200})
-TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu sharegpt ruler_1k ruler_2k ruler_3k ruler_4k ruler_1_4k}) ##### TASK humaneval math gsm8k gpqa mmlu sharegpt ruler_1k ruler_2k ruler_3k ruler_4k ruler_1_4k
-NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
-MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-32}"
 PORT="${PORT:-30000}"
-#DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-100}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
-THRESHOLD="${THRESHOLD:-0.85}"
-NUM_THREADS_SWEEP=(${NUM_THREADS_SWEEP:-200})  # sweep values 50 100 150 200
-SCHEDULER="${SCHEDULER:-FCFS}"               # LST | PREFILL | DECODE | FCFS | SOLA | TTFB
-STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-10.0}"    # strict SLO = multiplier × ideal latency
-RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-20.0}" # release SLO = multiplier × ideal latency
-STRICT_PROB="${STRICT_PROB:-1}"               # fraction of requests assigned strict SLO
-FORWARD_TIME_S="${FORWARD_TIME_S:-0.030}"          # shared fallback (s)
-PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"  # override prefill fwd time (s)
-DECODE_FORWARD_TIME_S="${DECODE_FORWARD_TIME_S:-}"    # override decode fwd time (s)
+THRESHOLD="${THRESHOLD:-0.95}"
+STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-10.0}"
+RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-20.0}" 
+STRICT_PROB="${STRICT_PROB:-1}"
+FORWARD_TIME_S="${FORWARD_TIME_S:-0.030}"
+PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"
+DECODE_FORWARD_TIME_S="${DECODE_FORWARD_TIME_S:-}"
 CONFIG_PATH="${CONFIG_PATH:-${OUTPUT_ROOT}/dlm_algo_config.yaml}"
 STEP_LOG_FILE="${STEP_LOG_FILE:-${OUTPUT_ROOT}/dlm_step_stats.jsonl}"
 REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-${OUTPUT_ROOT}/dlm_request_latency.jsonl}"
@@ -271,19 +270,34 @@ echo "============================================================"
 echo "DLM SLO rates"
 echo "============================================================"
 
-for RATE in "${REQUEST_RATES[@]}"; do
-    for TASK in "${TASKS[@]}"; do
+for TASK in "${TASKS[@]}"; do
+    # Collect all per-rate directories for this task in one call.
+    _latency_dirs=()
+    for RATE in "${REQUEST_RATES[@]}"; do
+        _latency_dirs+=("${OUTPUT_ROOT}/request_rate_${RATE}/${TASK}")
+    done
+
+    echo
+    echo "DLM SLO rate: task=${TASK}  rates=${REQUEST_RATES[*]}"
+    echo "------------------------------------------------------------"
+
+    SLO_PATH="${OUTPUT_ROOT}/slo_rates_${TASK}.json"
+    python test/dlm_slorate.py \
+        --latency-dir "${_latency_dirs[@]}" \
+        --tasks "${TASK}" \
+        --strict-factor "${STRICT_MULTIPLIER}" \
+        --relaxed-factor "${RELEASE_MULTIPLIER}" \
+        --output-json "${SLO_PATH}"
+
+    # Also write per-rate JSON for downstream consumers.
+    for RATE in "${REQUEST_RATES[@]}"; do
         OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}/${TASK}"
-        SLO_PATH="${OUT_DIR}/slo_rates.json"
-
-        echo
-        echo "DLM SLO rate: request_rate=${RATE}, task=${TASK}"
-        echo "------------------------------------------------------------"
-
         python test/dlm_slorate.py \
             --latency-dir "${OUT_DIR}" \
             --tasks "${TASK}" \
-            --output-json "${SLO_PATH}"
+            --strict-factor "${STRICT_MULTIPLIER}" \
+            --relaxed-factor "${RELEASE_MULTIPLIER}" \
+            --output-json "${OUT_DIR}/slo_rates.json" 2>/dev/null
     done
 done
 

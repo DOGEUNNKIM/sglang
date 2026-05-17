@@ -46,9 +46,19 @@ class TaskSlo:
 
 
 DEFAULT_BASE_MS: Dict[str, Dict[str, float]] = {
-    "gsm8k": {"ttfb_ms": 417.2, "tpob_ms": 348.5},
-    "humaneval": {"ttfb_ms": 312.9, "tpob_ms": 158.8},
-    "math": {"ttfb_ms": 404.5, "tpob_ms": 436.5},
+    "gsm8k":      {"ttfb_ms": 761.0,  "tpob_ms": 778.0},
+    "humaneval":  {"ttfb_ms": 417.2,  "tpob_ms": 348.5},
+    "math":       {"ttfb_ms": 417.2,  "tpob_ms": 348.5},
+    "gpqa":       {"ttfb_ms": 417.2,  "tpob_ms": 348.5},
+    "mmlu":       {"ttfb_ms": 417.2,  "tpob_ms": 348.5},
+    "sharegpt":   {"ttfb_ms": 417.2,  "tpob_ms": 348.5},
+    "ruler_1k":   {"ttfb_ms": 417.2,  "tpob_ms": 348.5},
+    "ruler_2k":   {"ttfb_ms": 417.2,  "tpob_ms": 348.5},
+    "ruler_3k":   {"ttfb_ms": 417.2,  "tpob_ms": 348.5},
+    "ruler_4k":   {"ttfb_ms": 417.2,  "tpob_ms": 348.5},
+    "ruler_8k":   {"ttfb_ms": 417.2,  "tpob_ms": 348.5},
+    "ruler_16k":  {"ttfb_ms": 417.2,  "tpob_ms": 348.5},
+    "ruler_1_4k": {"ttfb_ms": 417.2,  "tpob_ms": 348.5},
 }
 
 
@@ -90,25 +100,26 @@ def _load_summary_latency(summary_path: Path) -> Dict[str, List[Dict[str, Any]]]
     }
 
 
-def _load_dir_latency(latency_dir: Path, tasks: Iterable[str]) -> Dict[str, List[Dict[str, Any]]]:
-    return {
-        task: _read_jsonl(latency_dir / f"request_latency_{task}.jsonl")
-        for task in tasks
-    }
+def _load_dir_latency(latency_dirs: List[Path], tasks: Iterable[str]) -> Dict[str, List[Dict[str, Any]]]:
+    result: Dict[str, List[Dict[str, Any]]] = {task: [] for task in tasks}
+    for latency_dir in latency_dirs:
+        for task in tasks:
+            result[task].extend(_read_jsonl(latency_dir / f"request_latency_{task}.jsonl"))
+    return result
 
 
 def load_request_latency(
     summary_path: Optional[Path],
-    latency_dir: Optional[Path],
+    latency_dirs: Optional[List[Path]],
     tasks: Iterable[str],
 ) -> Dict[str, List[Dict[str, Any]]]:
     if summary_path is not None:
         loaded = _load_summary_latency(summary_path)
         if loaded:
             return {task: loaded.get(task, []) for task in tasks}
-    if latency_dir is None:
+    if not latency_dirs:
         raise ValueError("Either --summary or --latency-dir is required")
-    return _load_dir_latency(latency_dir, tasks)
+    return _load_dir_latency(latency_dirs, tasks)
 
 
 def _load_slo_config(path: Path, default_slos: Mapping[str, TaskSlo]) -> Dict[str, TaskSlo]:
@@ -316,7 +327,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--latency-dir",
         type=Path,
-        help="Directory containing request_latency_<task>.jsonl files",
+        nargs="+",
+        help="One or more directories containing request_latency_<task>.jsonl files (records are merged)",
     )
     parser.add_argument("--tasks", nargs="+", default=list(TASKS), help="Tasks to evaluate")
     parser.add_argument(
@@ -353,7 +365,7 @@ def main() -> None:
     if args.slo_config is not None:
         slos = _load_slo_config(args.slo_config, slos)
 
-    latency_by_task = load_request_latency(args.summary, args.latency_dir, tasks)
+    latency_by_task = load_request_latency(args.summary, args.latency_dir or [], tasks)
     results = compute_slo_rates(latency_by_task, slos, missing=args.missing)
     print_table(results, tasks)
 
