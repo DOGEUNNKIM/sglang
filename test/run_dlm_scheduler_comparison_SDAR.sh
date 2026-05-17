@@ -2,44 +2,59 @@
 set -euo pipefail
 
 MODEL_PATH="${MODEL_PATH:-JetLM/SDAR-8B-Chat}"
-BLOCK_SIZE="${BLOCK_SIZE:-16}"
+BLOCK_SIZE="${BLOCK_SIZE:-32}"
 
 ################################
-TASKS=(${TASKS:-sharegpt humaneval math gsm8k gpqa mmlu ruler_4k}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
-RATES_GSM8K="${RATES_GSM8K:-4 4.5 5 5.5}" # 결정
+TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu sharegpt ruler_4k}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
+# TP = 1일때
+RATES_GSM8K="${RATES_GSM8K:-3 4 5 6}" # 결정
 RATES_MMLU="${RATES_MMLU:-1 1.2 1.4 1.6}" # 결정
-RATES_HUMANEVAL="${RATES_HUMANEVAL:-12 16 20 24}" # 결정
-RATES_MATH="${RATES_MATH:-0.4 0.6 0.8 1}" # 결정
-RATES_GPQA="${RATES_GPQA:-0.4 0.6 0.8 1}" # 결정
-RATES_SHAREGPT="${RATES_SHAREGPT:-1 1.5 2 2.5}" # 결정
-RATES_RULER_4K="${RATES_RULER_4K:-1 1.2 1.4 1.6}"  # 결정
+RATES_HUMANEVAL="${RATES_HUMANEVAL:-8 10 12 14}" # 결정
+RATES_MATH="${RATES_MATH:-1 1.2 1.4 1.6}" # 결정
+RATES_GPQA="${RATES_GPQA:-0.8 0.9 1.0 1.1}" # 결정
+RATES_SHAREGPT="${RATES_SHAREGPT:-2 2.5 3 3.5}"
+RATES_RULER_4K="${RATES_RULER_4K:-2 2.5 3 3.5}" 
+# TP = 2일때
+#RATES_GSM8K="${RATES_GSM8K:-4 4.5 5 5.5}" # 결정
+#RATES_MMLU="${RATES_MMLU:-1 1.2 1.4 1.6}" # 결정
+#RATES_HUMANEVAL="${RATES_HUMANEVAL:-12 16 20 24}" # 결정
+#RATES_MATH="${RATES_MATH:-0.4 0.6 0.8 1}" # 결정
+#RATES_GPQA="${RATES_GPQA:-0.4 0.6 0.8 1}" # 결정
+#RATES_SHAREGPT="${RATES_SHAREGPT:-1 1.5 2 2.5}" # 결정
+#RATES_RULER_4K="${RATES_RULER_4K:-1 1.2 1.4 1.6}"  # 결정
 RATES_RULER_8K="${RATES_RULER_8K:-0.5 0.75 1 1.25}"
 RATES_RULER_16K="${RATES_RULER_16K:-0.5 0.75 1 1.25}"
 RATES_LONGBENCH_V2="${RATES_LONGBENCH_V2:-1 1.5 2 2.5}"
 # Per-task example cap (empty = full dataset). Override via env, e.g. NUM_EXAMPLES_MATH=100.
-NUM_EXAMPLES_GSM8K="${NUM_EXAMPLES_GSM8K:-}"
-NUM_EXAMPLES_HUMANEVAL="${NUM_EXAMPLES_HUMANEVAL:-}"
-NUM_EXAMPLES_MATH="${NUM_EXAMPLES_MATH:-1000}"
-NUM_EXAMPLES_GPQA="${NUM_EXAMPLES_GPQA:-}"
-NUM_EXAMPLES_MMLU="${NUM_EXAMPLES_MMLU:-1000}"
-NUM_EXAMPLES_SHAREGPT="${NUM_EXAMPLES_SHAREGPT:-1000}"
+NUM_EXAMPLES_GSM8K="${NUM_EXAMPLES_GSM8K:-200}"
+NUM_EXAMPLES_HUMANEVAL="${NUM_EXAMPLES_HUMANEVAL:-200}"
+NUM_EXAMPLES_MATH="${NUM_EXAMPLES_MATH:-200}"
+NUM_EXAMPLES_GPQA="${NUM_EXAMPLES_GPQA:-200}"
+NUM_EXAMPLES_MMLU="${NUM_EXAMPLES_MMLU:-200}"
+NUM_EXAMPLES_SHAREGPT="${NUM_EXAMPLES_SHAREGPT:-200}"
 NUM_EXAMPLES_RULER_4K="${NUM_EXAMPLES_RULER_4K:-200}"
 NUM_EXAMPLES_LONGBENCH_V2="${NUM_EXAMPLES_LONGBENCH_V2:-}"
 NUM_EXAMPLES_RULER_8K="${NUM_EXAMPLES_RULER_8K:-200}"
 NUM_EXAMPLES_RULER_16K="${NUM_EXAMPLES_RULER_16K:-200}"
-SCHEDULERS=(${SCHEDULERS:-TTFB DECODE LST SOLA}) # TTFB DECODE LST SOLA FCFS PREFILL
+SCHEDULERS=(${SCHEDULERS:-TTFB DECODE LST SOLA FCFS PREFILL}) # TTFB DECODE LST SOLA FCFS PREFILL
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-10.0}"
 RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-20.0}"
 STRICT_PROB="${STRICT_PROB:-1}"
 #TP가 2, batch 32이면 Forward 0.03
+#TP가 1, batch 32이면 Forward 0.08
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-32}"
 WARMUP="${WARMUP:-32}"
-TP_SIZE="${TP_SIZE:-2}" 
-FORWARD_TIME_S="${FORWARD_TIME_S:-0.03}"
+TP_SIZE="${TP_SIZE:-1}" 
+FORWARD_TIME_S="${FORWARD_TIME_S:-0.08}"
 ################################
 
 SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/nvme0/kdg6245}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRATCH_ROOT}/dlm_sched_comparison_SDAR}"
+
+if [[ -d "${OUTPUT_ROOT}" ]]; then
+    echo "[clean] removing previous results under ${OUTPUT_ROOT}"
+    rm -rf "${OUTPUT_ROOT}"
+fi
 REQUEST_RATES=(${REQUEST_RATES:-})  # fallback when task has no per-task rates
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 # NUM_THREADS / DLLM_ADMISSION_WINDOW: when unset, auto-detected from full dataset size per task.
@@ -218,27 +233,6 @@ except Exception:
 "
 }
 
-# _cleanup_benchmark_outputs OUT_DIR TASK
-# Keep only what dlm_slorate.py needs: request_latency_{task}.jsonl and {task}_{model_tag}.json.
-# Everything else is dropped immediately to save scratch space.
-_cleanup_benchmark_outputs() {
-    local _out="${1}" _task="${2}"
-    local _model_tag="${MODEL_PATH//\//_}"
-
-    rm -f "${_out}/steps_${_task}.jsonl" \
-          "${_out}/batch_latency_${_task}.jsonl" \
-          "${_out}/summary_${_model_tag}.json" \
-          "${_out}/step_stats_${_task}.jsonl" \
-          "${_out}/step_dist_${_model_tag}.png" \
-          "${_out}/step_boxplot_${_model_tag}.png" \
-          "${_out}/forward_latency_${_model_tag}.png" \
-          "${_out}/forward_latency_boxplot_${_model_tag}.png" \
-          "${_out}/request_latency_${_model_tag}.png" \
-          "${_out}/batch_latency_${_model_tag}.png" \
-          "${_out}/phase_sequence_${_model_tag}.png" \
-          "${_out}/phase_composition_${_model_tag}.png"
-}
-
 trap stop_server EXIT
 
 SERVER_LOG="${OUTPUT_ROOT}/server_log.txt"
@@ -280,6 +274,13 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
         mkdir -p "${OUT_DIR}"
 
         {
+            CONFIG_PATH="${OUT_DIR}/dllm_algo_config.yaml"
+            STEP_LOG_FILE="${OUT_DIR}/dlm_step_stats_${TASK}.jsonl"
+            REQUEST_LATENCY_LOG_FILE="${OUT_DIR}/dlm_request_latency_${TASK}.jsonl"
+            BATCH_LATENCY_LOG_FILE="${OUT_DIR}/dlm_batch_latency_${TASK}.jsonl"
+            export STEP_LOG_FILE REQUEST_LATENCY_LOG_FILE BATCH_LATENCY_LOG_FILE
+            RUN_SERVER_LOG="${OUT_DIR}/server.log"
+
             _task_size=$(_task_dataset_size "${TASK}")
             _task_examples=$(_task_max_examples "${TASK}")
             _effective_size="${_task_examples:-${_task_size}}"
@@ -325,7 +326,11 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
                 "${_scheduler_mode}" \
                 "${_admission_window}"
 
-            echo "===== scheduler=${SCHEDULER} rate=${RATE} task=${TASK} =====" >> "${SERVER_LOG}"
+            {
+                echo "===== scheduler=${SCHEDULER} rate=${RATE} task=${TASK} ====="
+                echo "model=${MODEL_PATH}"
+                echo "output_dir=${OUT_DIR}"
+            } | tee -a "${SERVER_LOG}" > "${RUN_SERVER_LOG}"
 
             PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.6 \
             python -m sglang.launch_server \
@@ -339,16 +344,13 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
                 --cuda-graph-max-bs "${MAX_RUNNING_REQUESTS}" \
                 --disable-cuda-graph-padding \
                 --tp-size "${TP_SIZE}" \
-                --mem-fraction-static 0.95 \
-                >> "${SERVER_LOG}" 2>&1 &
+                --mem-fraction-static 0.85 \
+                >> "${RUN_SERVER_LOG}" 2>&1 &
             SERVER_PID=$!
 
             echo "[server] pid=${SERVER_PID}, waiting for ${BASE_URL}/health"
             wait_server_ready
             echo "[server] ready"
-
-            # Clear stale /tmp log files before this run so previous data doesn't bleed in.
-            rm -f "${STEP_LOG_FILE}" "${REQUEST_LATENCY_LOG_FILE}" "${BATCH_LATENCY_LOG_FILE}"
 
             BENCH_ARGS=(
                 test/dlm_benchmark.py
@@ -369,10 +371,7 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
             PYTORCH_ALLOC_CONF=garbage_collection_threshold:0.6 \
             python "${BENCH_ARGS[@]}"
 
-            _cleanup_benchmark_outputs "${OUT_DIR}" "${TASK}"
-
             stop_server
-            rm -f "${STEP_LOG_FILE}" "${REQUEST_LATENCY_LOG_FILE}" "${BATCH_LATENCY_LOG_FILE}"
         }  # TASK block
         done  # RATE
     done  # TASK
@@ -457,7 +456,6 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
                 --tasks "${TASK}" \
                 --slo-config "${SLO_CONFIG_PATH}" \
                 --output-json "${SLO_PATH}"
-            rm -f "${OUT_DIR}/request_latency_${TASK}.jsonl"
         done
     done
 done

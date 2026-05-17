@@ -40,7 +40,7 @@ SERVER_PID=""
 # TODO: update with measurements for the current model.
 _ideal_ttfb_ms() {
     case "${1}" in
-        gsm8k)     echo "417.2" ;;
+        gsm8k)     echo "761" ;;
         humaneval) echo "417.2" ;;
         math)      echo "417.2" ;;
         gpqa)      echo "417.2" ;;
@@ -59,7 +59,7 @@ _ideal_ttfb_ms() {
 
 _ideal_tpob_ms() {
     case "${1}" in
-        gsm8k)     echo "348.5" ;;
+        gsm8k)     echo "778" ;;
         humaneval) echo "348.5" ;;
         math)      echo "348.5" ;;
         gpqa)      echo "348.5" ;;

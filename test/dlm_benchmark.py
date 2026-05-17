@@ -30,12 +30,15 @@ Usage (서버 이용한 test):
             --request-rate 8\
             --log
 
+# JetLM/SDAR-8B-Chat
+# inclusionAI/LLaDA2.0-mini
+# gsm8k humaneval math
 Usage (서버 자동 실행):
     python test/dlm_benchmark.py \
         --model-path inclusionAI/LLaDA2.0-mini \
-        --tasks gsm8k humaneval math \
-        --tp-size 2 --num-examples 200 \
-        --num-threads 200
+        --tasks gsm8k\
+        --tp-size 1 --num-examples 200 \
+        --request-rate 16 --num-threads 200 --log
 
 step_log_file 설정 예시 (config.yaml):
     threshold: 0.95
@@ -2609,7 +2612,7 @@ def main():
     parser.add_argument("--model-path", type=str, default=None,
                         help="HuggingFace 모델 경로 → 서버 자동 실행")
     parser.add_argument("--tp-size", type=int, default=1)
-    parser.add_argument("--mem-fraction-static", type=float, default=0.88)
+    parser.add_argument("--mem-fraction-static", type=float, default=0.90)
     parser.add_argument("--max-running-requests", type=int, default=32)
     parser.add_argument("--threshold", type=float, default=0.95,
                         help="LowConfidence unmasking threshold")
@@ -2668,7 +2671,13 @@ def main():
             "로 실행됐는지 확인하세요."
         )
 
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    out_root = Path(args.output_dir)
+    if out_root.exists():
+        model_tag = (args.model or args.model_path or "").replace("/", "_")
+        if model_tag:
+            for f in out_root.glob(f"*{model_tag}*"):
+                f.unlink()
+    out_root.mkdir(parents=True, exist_ok=True)
 
     server_proc = None
     base_url = args.base_url

@@ -58,12 +58,12 @@ def _read_bench_metrics(path: Path) -> dict[str, Any]:
 def discover_runs(output_root: Path, model_tag: str) -> dict[tuple[str, str, str], Path]:
     runs: dict[tuple[str, str, str], Path] = {}
     suffix = f"_{model_tag}.json"
-    for path in output_root.glob(f"scheduler_*/request_rate_*/*{suffix}"):
+    for path in output_root.glob(f"scheduler_*/request_rate_*/*/*{suffix}"):
         if path.name.startswith("summary_"):
             continue
         try:
-            scheduler = path.parents[1].name.removeprefix("scheduler_")
-            rate = path.parent.name.removeprefix("request_rate_")
+            scheduler = path.parents[2].name.removeprefix("scheduler_")
+            rate = path.parents[1].name.removeprefix("request_rate_")
         except IndexError:
             continue
         task = path.name[: -len(suffix)]
@@ -90,6 +90,7 @@ def build_slo_config(
                 output_root
                 / f"scheduler_{scheduler}"
                 / f"request_rate_{rate}"
+                / task
                 / f"{task}_{model_tag}.json"
             )
             if scheduler == "TTFB":
@@ -240,7 +241,7 @@ def main() -> None:
                 "--slo-config",
                 str(slo_config_path),
                 "--p99-normalize-baseline",
-                "",
+                "LST",
                 "--no-scatter",
                 "--no-bar",
             ]

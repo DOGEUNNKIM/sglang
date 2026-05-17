@@ -104,7 +104,7 @@ def collect_series(
     ys = []
     for rate, rate_data in summary.get(scheduler, {}).items():
         metrics = rate_data.get(task)
-        if not metrics or field not in metrics:
+        if not metrics or metrics.get(field) is None:
             continue
         xs.append(rate_key(rate))
         ys.append(float(metrics[field]))
@@ -538,7 +538,7 @@ def plot_scatter_ttfb_tpob(
     # Load and split records per scheduler
     sched_split: List[Tuple[str, str, List, List, List, List, List, List]] = []
     for scheduler in schedulers:
-        path = latency_root / f"scheduler_{scheduler}" / f"request_rate_{rate}" / f"request_latency_{task}.jsonl"
+        path = latency_root / f"scheduler_{scheduler}" / f"request_rate_{rate}" / task / f"request_latency_{task}.jsonl"
         records = _read_request_jsonl(path)
         if not records:
             continue
