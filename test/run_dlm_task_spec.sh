@@ -83,6 +83,9 @@ stop_server() {
 
 trap stop_server EXIT
 
+echo "[init] removing previous output: ${OUTPUT_ROOT}"
+rm -rf "${OUTPUT_ROOT}"
+
 SERVER_LOG="${OUTPUT_ROOT}/server_log.txt"
 mkdir -p "${OUTPUT_ROOT}"
 

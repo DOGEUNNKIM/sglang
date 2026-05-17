@@ -163,6 +163,9 @@ stop_server() {
 
 trap stop_server EXIT
 
+echo "[init] removing previous output: ${OUTPUT_ROOT}"
+rm -rf "${OUTPUT_ROOT}"
+
 SERVER_LOG="${OUTPUT_ROOT}/server_log.txt"
 mkdir -p "${OUTPUT_ROOT}"
 
@@ -301,28 +304,6 @@ for RATE in "${REQUEST_RATES[@]}"; do
             --log-dir "${OUT_DIR}" \
             --tasks "${TASK}" \
             --output "${OUT_DIR}/bellman_convergence.png"
-    done
-done
-
-echo
-echo "============================================================"
-echo "Step distribution plots"
-echo "============================================================"
-
-MODEL_SLUG="${MODEL_PATH//\//_}"
-
-for RATE in "${REQUEST_RATES[@]}"; do
-    for TASK in "${TASKS[@]}"; do
-        OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}/${TASK}"
-
-        echo
-        echo "Step distribution: request_rate=${RATE}, task=${TASK}"
-        echo "------------------------------------------------------------"
-
-        python test/plot_step_dist.py \
-            --log-dir "${OUT_DIR}" \
-            --tasks "${TASK}" \
-            --output "${OUT_DIR}/step_dist_${MODEL_SLUG}.png"
     done
 done
 
