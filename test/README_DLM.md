@@ -1,6 +1,6 @@
 # DLM Benchmark & Scheduler Comparison Guide
 
-이 문서는 DLM 관련 실행 스크립트와 후처리 스크립트의 관계를 정리한다. 핵심은 다음 세 단계다.
+이 문서는 DLM 관련 실행 스크립트와 후처리 스크립트의 관계를 정리한다. 
 
 ```text
 run_*.sh
@@ -19,12 +19,85 @@ run_*.sh
 | `dlm_benchmark.py` | 실제 benchmark 실행 엔진. 서버에 요청을 보내고 per-task 결과를 저장 |
 | `dlm_slorate.py` | `request_latency_<task>.jsonl`에서 SLO 달성률 계산 |
 | `finalize_dlm_scheduler_comparison.py` | 끝난 scheduler 비교 결과를 다시 스캔해서 `slo_config.json`, `slo_summary.json`, plot 재생성 |
+| `finalize_dlm_scheduler_comparison_LLADA2.sh` | LLADA2 결과 후처리 wrapper |
+| `finalize_dlm_scheduler_comparison_SDAR.sh` | SDAR 결과 후처리 wrapper |
 | `plot_dlm_slo_summary.py` | `slo_summary.json` 기반 scheduler 비교 plot 생성 |
 | `run_dlm_task_spec.sh` | task별 입력 길이, output block, step 분포 분석 |
 | `run_dlm_tb_update_test.sh` | Bellman table/TB update 동작 검증 |
 | `plot_bellman_convergence.py` | `bellman_log_<task>.jsonl` 수렴 plot 생성 |
 | `plot_step_dist.py` | `step_stats_<task>.jsonl` 기반 step distribution plot |
 | `dlm_plot_steps.py` | standalone step plot utility. `summary_*.json` 또는 `steps_*.jsonl` 사용 |
+
+## 스크립트 호출 관계
+
+자동으로 호출되는 관계와 사람이 수동으로 실행하는 관계를 분리해서 보면 다음과 같다.
+
+### 자동 호출 관계
+
+```text
+run_dlm_scheduler_comparison_LLADA2.sh
+  -> python -m sglang.launch_server
+  -> test/dlm_benchmark.py
+  -> test/dlm_slorate.py
+
+run_dlm_scheduler_comparison_SDAR.sh
+  -> python -m sglang.launch_server
+  -> test/dlm_benchmark.py
+  -> test/dlm_slorate.py
+
+finalize_dlm_scheduler_comparison.py
+  -> test/dlm_slorate.py
+  -> test/plot_dlm_slo_summary.py
+  -> test/plot_step_dist.py          (--step-plots 옵션을 줄 때만)
+
+finalize_dlm_scheduler_comparison_LLADA2.sh
+  -> test/finalize_dlm_scheduler_comparison.py
+
+finalize_dlm_scheduler_comparison_SDAR.sh
+  -> test/finalize_dlm_scheduler_comparison.py
+
+run_dlm_task_spec.sh
+  -> python -m sglang.launch_server
+  -> test/dlm_benchmark.py
+  -> inline Python plot code         (task_spec_<model>.png 생성)
+
+run_dlm_tb_update_test.sh
+  -> python -m sglang.launch_server
+  -> test/dlm_benchmark.py
+  -> test/dlm_slorate.py
+  -> test/plot_bellman_convergence.py
+  -> test/plot_step_dist.py
+```
+
+### 수동 실행용 스크립트
+
+아래 파일들은 보통 다른 스크립트가 호출하거나, 결과를 다시 보고 싶을 때 직접 실행한다.
+
+```text
+dlm_benchmark.py
+  - 이미 떠 있는 SGLang server에 request를 보내는 benchmark runner
+  - run_dlm_*.sh들이 주로 호출
+
+dlm_slorate.py
+  - request_latency_<task>.jsonl에서 SLO 달성률 계산
+  - run_dlm_scheduler_comparison_*.sh, run_dlm_tb_update_test.sh, finalize가 호출
+
+plot_dlm_slo_summary.py
+  - slo_summary.json에서 scheduler 비교 plot 생성
+  - finalize가 호출하거나 사용자가 직접 실행
+
+plot_step_dist.py
+  - step_stats_<task>.jsonl에서 step histogram 생성
+  - run_dlm_tb_update_test.sh와 finalize --step-plots가 호출
+
+plot_bellman_convergence.py
+  - bellman_log_<task>.jsonl에서 Bellman table 수렴 plot 생성
+  - run_dlm_tb_update_test.sh가 호출
+
+dlm_plot_steps.py
+  - summary_*.json 또는 steps_<task>.jsonl 기반 standalone step plotter
+  - 현재 메인 scheduler comparison 흐름에서는 자동 호출되지 않음
+```
 
 ## 1. Scheduler 비교 실험
 
@@ -54,14 +127,14 @@ for scheduler in SCHEDULERS:
       4. dlm_benchmark.py 실행
       5. 서버 종료
 
-TTFB scheduler 완료 후:
-  task별 ideal TTFB 추출
+  if scheduler == TTFB:
+    task별 highest-rate 결과에서 ideal TTFB 추출
 
-DECODE scheduler 완료 후:
-  task별 ideal TPOB 추출
+  if scheduler == DECODE:
+    task별 highest-rate 결과에서 ideal TPOB 추출
 
-전체 benchmark 완료 후:
-  1. slo_config.json 생성
+for scheduler loop가 모두 끝난 후:
+  1. TTFB/DECODE에서 추출한 ideal 값으로 slo_config.json 생성
   2. 각 run에 대해 dlm_slorate.py 실행 -> slo_rates.json
   3. 전체 결과를 모아 slo_summary.json 생성
 ```
@@ -115,17 +188,27 @@ Scheduler comparison 스크립트는 `slo_summary.json`까지 만든다. 이미 
 ### LLADA2
 
 ```bash
-python ./test/finalize_dlm_scheduler_comparison.py \
-  --output-root /mnt/nvme0/kdg6245/dlm_sched_comparison_LLADA2 \
-  --model-path inclusionAI/LLaDA2.0-mini
+./test/finalize_dlm_scheduler_comparison_LLADA2.sh
 ```
 
 ### SDAR
 
 ```bash
-python ./test/finalize_dlm_scheduler_comparison.py \
-  --output-root /mnt/nvme0/kdg6245/dlm_sched_comparison_SDAR \
-  --model-path JetLM/SDAR-8B-Chat
+./test/finalize_dlm_scheduler_comparison_SDAR.sh
+```
+
+추가 옵션은 wrapper 뒤에 그대로 붙이면 된다.
+
+```bash
+./test/finalize_dlm_scheduler_comparison_LLADA2.sh --step-plots
+./test/finalize_dlm_scheduler_comparison_SDAR.sh --skip-summary-plots
+```
+
+기본 경로를 바꾸고 싶으면 환경변수로 지정한다.
+
+```bash
+OUTPUT_ROOT=/path/to/results ./test/finalize_dlm_scheduler_comparison_LLADA2.sh
+MODEL_PATH=custom/model ./test/finalize_dlm_scheduler_comparison_SDAR.sh
 ```
 
 `finalize_dlm_scheduler_comparison.py`가 하는 일:
@@ -352,6 +435,83 @@ step_boxplot_<model_tag>.png
 
 대부분의 후처리 스크립트는 `request_latency_<task>.jsonl`을 읽는다.
 
+## JSONL 파일 예시
+
+JSONL은 한 줄에 JSON object 하나가 들어가는 형식이다. 즉 파일 전체가 하나의 JSON 배열이 아니라, 아래처럼 줄 단위로 읽는다.
+
+```jsonl
+{"request_id": 0, "ttfb_ms": 1240.5, "tpob_ms": 315.2}
+{"request_id": 1, "ttfb_ms": 1522.8, "tpob_ms": 401.7}
+```
+
+### `request_latency_<task>.jsonl`
+
+`dlm_benchmark.py`가 저장하는 request-level latency 파일이다. `dlm_slorate.py`와 `plot_dlm_slo_summary.py` scatter plot이 주로 읽는다.
+
+대표 형태:
+
+```jsonl
+{"request_id": 0, "task": "humaneval", "input_len": 287, "output_len": 96, "ttfb_ms": 3182.4, "tpob_ms": 412.8, "latency_ms": 19840.1, "slo_type": "strict", "block_steps_list": [4, 3, 5, 2]}
+{"request_id": 1, "task": "humaneval", "input_len": 311, "output_len": 80, "ttfb_ms": 2740.9, "tpob_ms": 366.5, "latency_ms": 16602.7, "slo_type": "release", "block_steps_list": [3, 3, 4]}
+```
+
+자주 쓰는 필드:
+
+| 필드 | 의미 |
+|------|------|
+| `ttfb_ms` | first block/token까지 걸린 시간 |
+| `tpob_ms` | output block 사이 평균 시간 |
+| `input_len` | 입력 token 길이 |
+| `output_len` | 출력 token 길이 |
+| `slo_type` | strict/release 요청 구분 |
+| `block_steps_list` | output block별 unmask step 수 |
+
+### `batch_latency_<task>.jsonl`
+
+batch/phase 단위 latency 기록이다. request-level SLO 계산보다는 batch phase 분석에 가깝다.
+
+대표 형태:
+
+```jsonl
+{"batch_id": 12, "phase": "initial_prefill", "duration_ms": 95.4, "batch_size": 8, "num_output_blocks": 0}
+{"batch_id": 13, "phase": "decode", "duration_ms": 42.1, "batch_size": 16, "num_output_blocks": 16}
+```
+
+### `steps_<task>.jsonl`
+
+`dlm_benchmark.py`가 서버 step log를 정규화해서 저장한 파일이다. `dlm_plot_steps.py` 같은 standalone step plotter가 읽을 수 있다.
+
+대표 형태:
+
+```jsonl
+{"raw_forward_calls": 1, "block_steps": []}
+{"raw_forward_calls": 4, "block_steps": [4, 3, 5]}
+```
+
+### `dlm_step_stats_<task>.jsonl` 또는 `step_stats_<task>.jsonl`
+
+서버가 직접 쓰거나 task-spec/TB 스크립트가 복사해 둔 step-level raw 기록이다. `plot_step_dist.py`는 `step_stats_<task>.jsonl` 이름을 기본으로 찾는다.
+
+대표 형태:
+
+```jsonl
+{"raw_forward_calls": 1, "forward_duration_ms": 10.2, "unmask_steps": 0, "block_steps": [0], "final_block_steps": [], "req_modes": ["prefill"], "kv_saved": [false]}
+{"raw_forward_calls": 4, "forward_duration_ms": 38.7, "unmask_steps": 3, "block_steps": [3, 4, 2], "final_block_steps": [3], "req_modes": ["unmask", "unmask", "prefill"], "kv_saved": [true, false, false]}
+```
+
+### `bellman_log_<task>.jsonl`
+
+Bellman table/TB update 실험에서 생성된다. `plot_bellman_convergence.py`가 읽는다.
+
+대표 형태:
+
+```jsonl
+{"block_id": 0, "table": [0.0, 1.0, 2.1, 3.2], "trajectory": [4, 3, 2, 1, 0]}
+{"block_id": 1, "table": [0.0, 1.0, 1.9, 2.8], "trajectory": [3, 2, 1, 0]}
+```
+
+필드는 구현 변경에 따라 조금 달라질 수 있지만, 기본적으로 TB table snapshot과 실제 remaining-mask trajectory를 줄 단위로 저장한다고 보면 된다.
+
 ### `slo_rates.json`과 `slo_summary.json`
 
 `slo_rates.json`은 run 하나에 대한 결과다.
@@ -373,4 +533,3 @@ OUTPUT_ROOT/slo_summary.json
 ### run script 시작 시 기존 결과는 삭제된다
 
 `run_dlm_scheduler_comparison_LLADA2.sh`와 `run_dlm_scheduler_comparison_SDAR.sh`는 시작할 때 해당 `OUTPUT_ROOT`를 삭제한다. 같은 output root에 이전 결과를 보존하고 싶으면 실행 전에 `OUTPUT_ROOT`를 다르게 지정해야 한다.
-
