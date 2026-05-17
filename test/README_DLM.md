@@ -1,33 +1,33 @@
 # DLM Scheduler Script Guide
 
-이 문서는 DLM 관련 Run 및 Plot Script의 관계를 정리한다. 
+This document describes the DLM run and plot scripts and how they relate to each other.
 
 ```text
 run_*.sh
-  -> sglang.launch_server를 띄움
-  -> dlm_benchmark.py로 실제 request를 보냄
-  -> dlm_slorate.py로 SLO 달성률을 계산
-  -> 필요하면 finalize/plot 스크립트로 결과를 다시 정리
+  -> launches sglang.launch_server
+  -> sends requests via dlm_benchmark.py
+  -> computes SLO attainment via dlm_slorate.py
+  -> optionally re-generates plots with finalize/plot scripts
 ```
 
-## 파일 역할 요약
+## File Overview
 
-| 파일 | 역할 |
+| File | Role |
 |------|------|
-| `run_dlm_scheduler_comparison_LLADA2.sh` | LLaDA2.0-mini scheduler 비교 실험 |
-| `run_dlm_scheduler_comparison_SDAR.sh` | SDAR-8B-Chat scheduler 비교 실험 |
-| `plot_dlm_scheduler_comparison_LLADA2.sh` | LLADA2 결과 plot wrapper |
-| `plot_dlm_scheduler_comparison_SDAR.sh` | SDAR 결과 plot wrapper |
-| `run_dlm_task_spec.sh` | task별 입력 길이, output block, step 분포 분석 |
-| `run_dlm_tb_update_test.sh` | Bellman table/TB update 동작 검증 |
-| `dlm_benchmark.py` | 실제 benchmark 실행 엔진. 서버에 요청을 보내고 per-task 결과를 저장 |
-| `dlm_slorate.py` | `request_latency_<task>.jsonl`에서 SLO 달성률 계산 |
-| `plot_dlm_scheduler_comparison.py` | `slo_summary.json` 기반 scheduler 비교 plot 생성 |
-| `plot_bellman_convergence.py` | `bellman_log_<task>.jsonl` 수렴 plot 생성 |
+| `run_dlm_scheduler_comparison_LLADA2.sh` | Scheduler comparison experiment for LLaDA2.0-mini |
+| `run_dlm_scheduler_comparison_SDAR.sh` | Scheduler comparison experiment for SDAR-8B-Chat |
+| `plot_dlm_scheduler_comparison_LLADA2.sh` | Re-plot wrapper for LLADA2 results |
+| `plot_dlm_scheduler_comparison_SDAR.sh` | Re-plot wrapper for SDAR results |
+| `run_dlm_task_spec.sh` | Measures per-task input length, output block, and step distributions |
+| `run_dlm_tb_update_test.sh` | Verifies that the Bellman table update converges to the actual step distribution |
+| `dlm_benchmark.py` | Benchmark runner — sends requests to a running SGLang server and saves per-task results |
+| `dlm_slorate.py` | Computes SLO attainment rates from `request_latency_<task>.jsonl` |
+| `plot_dlm_scheduler_comparison.py` | Generates scheduler comparison plots from `slo_summary.json` |
+| `plot_bellman_convergence.py` | Plots Bellman table convergence from `bellman_log_<task>.jsonl` |
 
-## Script와 Python File
+## Script and Python File Relationships
 
-### Script
+### Scripts
 
 ```text
 run_dlm_scheduler_comparison_LLADA2.sh
@@ -49,7 +49,7 @@ plot_dlm_scheduler_comparison_SDAR.sh
 run_dlm_task_spec.sh
   -> python -m sglang.launch_server
   -> test/dlm_benchmark.py
-  -> plot code for task_spec_<model>.png
+  -> inline plot code  (produces task_spec_<model>.png)
 
 run_dlm_tb_update_test.sh
   -> python -m sglang.launch_server
@@ -58,12 +58,12 @@ run_dlm_tb_update_test.sh
   -> test/plot_bellman_convergence.py
 ```
 
-### Python File
+### Python Files
 
 ```text
 dlm_benchmark.py
-  - 이미 떠 있는 SGLang server에 request를 보내는 benchmark runner
-  - 결과:
+  - Benchmark runner for an already-running SGLang server
+  - Outputs:
     <output-dir>/<task>_<model_tag>.json
     <output-dir>/summary_<model_tag>.json
     <output-dir>/request_latency_<task>.jsonl
@@ -71,13 +71,13 @@ dlm_benchmark.py
     <output-dir>/steps_<task>.jsonl
 
 dlm_slorate.py
-  - request_latency_<task>.jsonl에서 SLO 달성률 계산
-  - 결과:
+  - Computes SLO attainment from request_latency_<task>.jsonl
+  - Outputs:
     <latency-dir>/slo_rates.json
 
 plot_dlm_scheduler_comparison.py
-  - slo_summary.json에서 scheduler 비교 plot 생성
-  - 결과:
+  - Generates scheduler comparison plots from slo_summary.json
+  - Outputs:
     slo_attainment_comparison.png
     slo_attainment_comparison_p99_latency.png
     slo_attainment_comparison_scatter.png
@@ -86,69 +86,69 @@ plot_dlm_scheduler_comparison.py
     slo_attainment_comparison_bar_p99.png
 
 plot_bellman_convergence.py
-  - bellman_log_<task>.jsonl에서 Bellman table 수렴 plot 생성
-  - 결과:
-    사용자가 --output으로 지정한 PNG
+  - Plots Bellman table convergence from bellman_log_<task>.jsonl
+  - Outputs:
+    PNG file specified by --output
 ```
 
-## 1. Run scheduler_comparison Script
+## 1. Run Scheduler Comparison Script
 
-### 실행
+### Run
 
 ```bash
 ./test/run_dlm_scheduler_comparison_LLADA2.sh
 ./test/run_dlm_scheduler_comparison_SDAR.sh
 ```
 
-### 주요 파라미터
+### Key Parameters
 
-두 스크립트는 모델 관련 기본값만 다르고 나머지는 동일하다.
+The two scripts differ only in model-specific defaults.
 
-| 변수 | LLADA2 기본값 | SDAR 기본값 | 설명 |
-|------|--------------|------------|------|
-| `MODEL_PATH` | `inclusionAI/LLaDA2.0-mini` | `JetLM/SDAR-8B-Chat` | 서버 모델 경로 |
-| `FORWARD_TIME_S` | `0.04` | `0.08` | 한 번의 forward pass 예상 소요 시간 (s) |
-| `OUTPUT_ROOT` | `.../dlm_sched_comparison_LLADA2` | `.../dlm_sched_comparison_SDAR` | 결과 저장 루트 |
-| `BLOCK_SIZE` | `32` | `32` | output block 크기 (토큰 수) |
-| `TASKS` | `humaneval math gsm8k gpqa mmlu sharegpt ruler_4k` | 동일 | 비교 대상 태스크 목록 |
-| `RATES_<TASK>` | 태스크별 4개 값 (예: humaneval `10 12 14 16`) | 태스크별 4개 값 (예: humaneval `8 10 12 14`) | 태스크별 request rate sweep 값 |
-| `NUM_EXAMPLES_<TASK>` | `200` | `200` | 태스크당 request 수 |
-| `SCHEDULERS` | `TTFB DECODE LST SOLA FCFS PREFILL` | 동일 | 비교할 scheduler 목록 |
+| Variable | LLADA2 default | SDAR default | Description |
+|----------|---------------|-------------|-------------|
+| `MODEL_PATH` | `inclusionAI/LLaDA2.0-mini` | `JetLM/SDAR-8B-Chat` | Model path for the server |
+| `FORWARD_TIME_S` | `0.04` | `0.08` | Expected time per forward pass (s) |
+| `OUTPUT_ROOT` | `.../dlm_sched_comparison_LLADA2` | `.../dlm_sched_comparison_SDAR` | Root directory for all outputs |
+| `BLOCK_SIZE` | `32` | `32` | Output block size (tokens) |
+| `TASKS` | `humaneval math gsm8k gpqa mmlu sharegpt ruler_4k` | same | Tasks to benchmark |
+| `RATES_<TASK>` | 4 values per task (e.g. humaneval `10 12 14 16`) | 4 values per task (e.g. humaneval `8 10 12 14`) | Request rate sweep values per task |
+| `NUM_EXAMPLES_<TASK>` | `200` | `200` | Number of requests per task |
+| `SCHEDULERS` | `TTFB DECODE LST SOLA FCFS PREFILL` | same | Schedulers to compare |
 | `STRICT_MULTIPLIER` | `10.0` | `10.0` | strict SLO = multiplier × ideal latency |
 | `RELEASE_MULTIPLIER` | `20.0` | `20.0` | release SLO = multiplier × ideal latency |
-| `MAX_RUNNING_REQUESTS` | `32` | `32` | 서버 최대 동시 request 수 |
-| `WARMUP` | `32` | `32` | warmup request 수 |
-| `TP_SIZE` | `1` | `1` | tensor parallelism 크기 |
+| `MAX_RUNNING_REQUESTS` | `32` | `32` | Max concurrent requests on the server |
+| `WARMUP` | `32` | `32` | Number of warmup requests |
+| `TP_SIZE` | `1` | `1` | Tensor parallelism size |
 
-### 내부 흐름
+### Internal Flow
 
 ```text
-이전 실행 OUTPUT_ROOT를 삭제
-  LLADA2 기본 OUTPUT_ROOT = /mnt/nvme0/kdg6245/dlm_sched_comparison_LLADA2
-  SDAR   기본 OUTPUT_ROOT = /mnt/nvme0/kdg6245/dlm_sched_comparison_SDAR
+Delete previous OUTPUT_ROOT
+  LLADA2 default OUTPUT_ROOT = /mnt/nvme0/kdg6245/dlm_sched_comparison_LLADA2
+  SDAR   default OUTPUT_ROOT = /mnt/nvme0/kdg6245/dlm_sched_comparison_SDAR
 
 for scheduler in SCHEDULERS:
   for task in TASKS:
-    for rate in task별 request rates:
-      1. run별 OUT_DIR 생성
-      2. run별 dllm config 작성
-      3. sglang.launch_server 실행
-      4. dlm_benchmark.py 실행
-      5. 서버 종료
+    for rate in per-task request rates:
+      1. Create OUT_DIR for this run
+      2. Write dlm_algo_config.yaml for this run
+      3. Launch sglang.launch_server
+      4. Run dlm_benchmark.py
+      5. Stop server
 
   if scheduler == TTFB:
-    task별 highest-rate 결과에서 ideal TTFB 추출
+    Extract ideal TTFB from the highest-rate result for each task
 
   if scheduler == DECODE:
-    task별 highest-rate 결과에서 ideal TPOB 추출
+    Extract ideal TPOB from the highest-rate result for each task
 
-for scheduler loop가 모두 끝난 후:
-  1. TTFB/DECODE에서 추출한 ideal 값으로 slo_config.json 생성
-  2. 각 run에 대해 dlm_slorate.py 실행 -> slo_rates.json
-  3. 전체 결과를 모아 slo_summary.json 생성
+After all schedulers finish:
+  1. Build slo_config.json from the extracted ideal TTFB/TPOB values
+  2. Run dlm_slorate.py for each run -> slo_rates.json
+  3. Aggregate all results into slo_summary.json
 ```
 
-### Run별 출력 구조
+### Output Structure
 
 ```text
 OUTPUT_ROOT/
@@ -174,123 +174,124 @@ OUTPUT_ROOT/
         slo_rates.json
 ```
 
-중요한 파일:
+Key files:
 
-| 파일 | 설명 |
-|------|------|
-| `<task>_<model_tag>.json` | accuracy, throughput, p99 TTFB/TPOB, ideal latency 등 run 요약 |
-| `request_latency_<task>.jsonl` | `dlm_slorate.py`와 scatter plot이 읽는 request-level latency |
-| `dlm_*_<task>.jsonl` | 서버가 직접 쓴 raw DLM 로그 |
-| `slo_rates.json` | 해당 scheduler/task/rate의 strict/relaxed SLO 달성률 |
-| `slo_config.json` | task별 strict/relaxed SLO threshold |
-| `slo_summary.json` | 모든 scheduler/task/rate 결과를 모은 plot 입력 |
+| File | Description |
+|------|-------------|
+| `<task>_<model_tag>.json` | Run summary: accuracy, throughput, p99 TTFB/TPOB, ideal latency |
+| `request_latency_<task>.jsonl` | Request-level latency records; read by `dlm_slorate.py` and scatter plots |
+| `dlm_*_<task>.jsonl` | Raw DLM logs written directly by the server |
+| `slo_rates.json` | Strict/relaxed SLO attainment rates for this scheduler/task/rate |
+| `slo_config.json` | Per-task strict/relaxed SLO thresholds |
+| `slo_summary.json` | All scheduler/task/rate results aggregated; input to the plot script |
 
-## 2. Plot dlm scheduler comparison Script
+## 2. Plot Scheduler Comparison Script
 
-Scheduler comparison Script가 만든 `slo_summary.json`과 `slo_config.json`으로 결과 plot을 다시 생성할 때 사용한다. 두 wrapper는 내부적으로 `plot_dlm_scheduler_comparison.py`를 바로 호출한다.
+Regenerates plots from an existing `slo_summary.json` and `slo_config.json` without re-running the benchmark. Both wrappers call `plot_dlm_scheduler_comparison.py` directly.
 
-### 실행
+### Run
+
 ```bash
 ./test/plot_dlm_scheduler_comparison_LLADA2.sh --bar-task humaneval --bar-rate 14
 ./test/plot_dlm_scheduler_comparison_SDAR.sh --bar-task humaneval --bar-rate 14
 ```
 
-### 주요 파라미터
+### Key Parameters
 
-| 변수 | LLADA2 기본값 | SDAR 기본값 | 설명 |
-|------|--------------|------------|------|
-| `OUTPUT_ROOT` | `.../dlm_sched_comparison_LLADA2` | `.../dlm_sched_comparison_SDAR` | `slo_summary.json`과 `slo_config.json`을 읽고 PNG를 저장하는 루트 |
+| Variable | LLADA2 default | SDAR default | Description |
+|----------|---------------|-------------|-------------|
+| `OUTPUT_ROOT` | `.../dlm_sched_comparison_LLADA2` | `.../dlm_sched_comparison_SDAR` | Root to read `slo_summary.json` / `slo_config.json` from and save PNGs to |
 
-CLI 인자(`--bar-task`, `--bar-rate` 등)는 `$@`로 `plot_dlm_scheduler_comparison.py`에 그대로 전달된다.
+All other CLI arguments (e.g. `--bar-task`, `--bar-rate`) are passed through via `$@` to `plot_dlm_scheduler_comparison.py`.
 
-### 내부 흐름
+### Internal Flow
 
 ```text
-1. 기존 결과 파일 확인
-   - OUTPUT_ROOT/slo_summary.json이 있어야 한다.
-   - OUTPUT_ROOT/slo_config.json이 있어야 한다.
-   - 이 두 파일은 run_dlm_scheduler_comparison_*.sh가 정상 완료되면 생성된다.
+1. Check that required files exist
+   - OUTPUT_ROOT/slo_summary.json  (created by run_dlm_scheduler_comparison_*.sh)
+   - OUTPUT_ROOT/slo_config.json   (created by run_dlm_scheduler_comparison_*.sh)
 
-2. plot_dlm_scheduler_comparison.py 실행
-   - --summary OUTPUT_ROOT/slo_summary.json
-   - --output OUTPUT_ROOT/slo_attainment_comparison.png
+2. Run plot_dlm_scheduler_comparison.py
+   - --summary    OUTPUT_ROOT/slo_summary.json
+   - --output     OUTPUT_ROOT/slo_attainment_comparison.png
    - --slo-config OUTPUT_ROOT/slo_config.json
-   - p99 latency는 LST scheduler를 baseline으로 normalize한다.
-   - --bar-task, --bar-rate 값은 scatter/bar plot 대상 task/rate로 plot_dlm_scheduler_comparison.py에 전달된다.
+   - p99 latency is normalized against the LST scheduler baseline
+   - --bar-task and --bar-rate select the task/rate for scatter and bar plots
 ```
 
-### 출력 구조
+This wrapper does not recompute SLO thresholds, does not run `dlm_slorate.py`, and does not rewrite `slo_summary.json`.
 
-| 파일 | 설명 |
-|------|------|
-| `slo_attainment_comparison.png` | strict/relaxed SLO 달성률 curve |
-| `slo_attainment_comparison_p99_latency.png` | p99 TTFB/TPOB 비교 |
-| `slo_attainment_comparison_scatter.png` | scheduler별 TTFB vs TPOB scatter |
-| `slo_attainment_comparison_scatter_combined.png` | scheduler 통합 scatter |
-| `slo_attainment_comparison_strict_release.png` | 특정 task/rate의 strict vs relaxed bar |
-| `slo_attainment_comparison_bar_p99.png` | 특정 task/rate의 p99 TTFB/TPOB bar |
+### Output
 
+| File | Description |
+|------|-------------|
+| `slo_attainment_comparison.png` | Strict/relaxed SLO attainment curves |
+| `slo_attainment_comparison_p99_latency.png` | p99 TTFB/TPOB comparison |
+| `slo_attainment_comparison_scatter.png` | TTFB vs TPOB scatter per scheduler |
+| `slo_attainment_comparison_scatter_combined.png` | Combined scatter across schedulers |
+| `slo_attainment_comparison_strict_release.png` | Strict vs relaxed bar for a specific task/rate |
+| `slo_attainment_comparison_bar_p99.png` | p99 TTFB/TPOB bar for a specific task/rate |
 
 ## 3. Task Spec Script
 
-태스크별 입력 길이·steps/block·output block 수·within-batch CoV 분포를 측정한다. 태스크마다 서버를 새로 띄우고 짧은 벤치마크를 돌린 뒤, 수집된 로그를 inline Python으로 한 장의 PNG에 합친다.
+Measures per-task distributions of input length, steps per block, output block count, and within-batch CoV. Starts a fresh server for each task, runs a short benchmark, then combines all logs into a single PNG using inline Python.
 
-### 실행
+### Run
 
 ```bash
 ./test/run_dlm_task_spec.sh
 ```
 
-### 주요 파라미터
+### Key Parameters
 
-| 변수 | 기본값 | 설명 |
-|------|--------|------|
-| `MODEL_PATH` | `JetLM/SDAR-8B-Chat` | 서버 모델 경로 |
-| `BLOCK_SIZE` | `32` | output block 크기 (토큰 수) |
-| `TASKS` | `sharegpt humaneval math gsm8k gpqa mmlu ruler_1k … ruler_1_4k` | 측정 태스크 목록 |
-| `NUM_EXAMPLES` | `200` | 태스크당 request 수 |
-| `REQUEST_RATE` | `200` | 요청 속도 (req/s, 사실상 포화) |
-| `NUM_THREADS` | `200` | 클라이언트 동시 스레드 수 |
-| `WARMUP` | `16` | warmup request 수 |
-| `MAX_RUNNING_REQUESTS` | `32` | 서버 최대 동시 request 수 |
-| `OUTPUT_ROOT` | `/mnt/nvme0/kdg6245/dlm_task_spec` | 결과 저장 루트 |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MODEL_PATH` | `JetLM/SDAR-8B-Chat` | Model path for the server |
+| `BLOCK_SIZE` | `32` | Output block size (tokens) |
+| `TASKS` | `sharegpt humaneval math gsm8k gpqa mmlu ruler_1k … ruler_1_4k` | Tasks to measure |
+| `NUM_EXAMPLES` | `200` | Number of requests per task |
+| `REQUEST_RATE` | `200` | Request rate (req/s, effectively saturated) |
+| `NUM_THREADS` | `200` | Number of concurrent client threads |
+| `WARMUP` | `16` | Number of warmup requests |
+| `MAX_RUNNING_REQUESTS` | `32` | Max concurrent requests on the server |
+| `OUTPUT_ROOT` | `/mnt/nvme0/kdg6245/dlm_task_spec` | Root directory for all outputs |
 
-### 내부 흐름
+### Internal Flow
 
 ```text
-이전 실행 OUTPUT_ROOT를 삭제
-  기본 OUTPUT_ROOT = /mnt/nvme0/kdg6245/dlm_task_spec
+Delete previous OUTPUT_ROOT
+  default OUTPUT_ROOT = /mnt/nvme0/kdg6245/dlm_task_spec
 
-Phase 1 — per-task 데이터 수집 (TASKS 순으로 반복)
+Phase 1 — per-task data collection (iterates over TASKS)
   for TASK in TASKS:
-    1. dlm_algo_config.yaml 작성
+    1. Write dlm_algo_config.yaml
        scheduler_mode=fcfs, threshold=0.85
        request_latency_log_file / step_log_file -> OUTPUT_ROOT/tmp_*.jsonl
-    2. sglang.launch_server 실행
+    2. Launch sglang.launch_server
        --dllm-algorithm LowConfidence
        --max-running-requests 32
-    3. dlm_benchmark.py 실행
+    3. Run dlm_benchmark.py
        --request-rate 200 --num-threads 200 --warmup 16 --num-examples 200
-    4. 로그 복사
+    4. Copy logs
        tmp_request_latency.jsonl -> OUT_DIR/request_latency_<task>.jsonl
        tmp_step_stats.jsonl      -> OUT_DIR/step_stats_<task>.jsonl
-    5. 서버 종료
+    5. Stop server
 
 Phase 2 — combined plot (inline Python)
-  request_latency_<task>.jsonl  에서: input_len, block_steps_list, output block 수 집계
-  step_stats_<task>.jsonl       에서: unmasking 중인 요청들의 block_steps CoV 계산
-  4행 × n태스크 subplot 생성 -> OUTPUT_ROOT/task_spec_<model_slug>.png 저장
-  summary 통계 테이블 stdout 출력
+  request_latency_<task>.jsonl : collect input_len, block_steps_list, output block count
+  step_stats_<task>.jsonl      : compute within-batch CoV of block_steps for unmasking requests
+  Build 4-row × n-task subplot grid -> save OUTPUT_ROOT/task_spec_<model_slug>.png
+  Print summary stats to stdout
     (InputLen mean/std, Steps mean/std/CoV, OutBlk mean/std, WB-CoV mean/std)
 ```
 
-### 출력 구조
+### Output Structure
 
 ```text
 /mnt/nvme0/kdg6245/dlm_task_spec/
   server_log.txt
   dlm_algo_config.yaml
-  task_spec_<model_slug>.png        ← 4행 combined plot
+  task_spec_<model_slug>.png        <- 4-row combined plot
 
   <task>/
     <task>_<model_tag>.json
@@ -299,80 +300,80 @@ Phase 2 — combined plot (inline Python)
     step_stats_<task>.jsonl
 ```
 
-중요한 파일:
+Key files:
 
-| 파일 | 설명 |
-|------|------|
-| `task_spec_<model_slug>.png` | Row 0: input length 분포 / Row 1: steps/block 분포 / Row 2: output blocks/request 분포 / Row 3: within-batch CoV of block_steps (bubble 기회 지표) |
-| `request_latency_<task>.jsonl` | per-request 레코드. `input_len`, `block_steps_list`, TTFB/TPOB 포함. Phase 2 plot의 주 입력 |
-| `step_stats_<task>.jsonl` | per-batch-step 레코드. `req_modes`, `block_steps` 포함. CoV 계산에 사용 |
-| `<task>_<model_tag>.json` | accuracy, throughput, p99 TTFB/TPOB 요약 |
+| File | Description |
+|------|-------------|
+| `task_spec_<model_slug>.png` | Row 0: input length / Row 1: steps per block / Row 2: output blocks per request / Row 3: within-batch CoV of block steps (bubble opportunity) |
+| `request_latency_<task>.jsonl` | Per-request records containing `input_len`, `block_steps_list`, TTFB/TPOB; primary input for the Phase 2 plot |
+| `step_stats_<task>.jsonl` | Per-batch-step records containing `req_modes` and `block_steps`; used for CoV computation |
+| `<task>_<model_tag>.json` | Summary of accuracy, throughput, and p99 TTFB/TPOB |
 
 ## 4. Bellman Table Update Script
 
-Bellman table update가 실제 step 분포에 수렴하는지 확인한다. REQUEST_RATES × NUM_THREADS_SWEEP × TASKS 조합을 순회하며 태스크마다 서버를 새로 띄우고, 완료 후 SLO rate·Bellman 수렴 plot·step 분포 plot을 순서대로 생성한다.
+Verifies that the Bellman table update converges to the actual step distribution. Iterates over all REQUEST_RATES × NUM_THREADS_SWEEP × TASKS combinations, starting a fresh server for each task, then generates SLO rates and Bellman convergence plots after all runs finish.
 
-### 실행
+### Run
 
 ```bash
 ./test/run_dlm_tb_update_test.sh
 ```
 
-### 주요 파라미터
+### Key Parameters
 
-| 변수 | 기본값 | 설명 |
-|------|--------|------|
-| `MODEL_PATH` | `JetLM/SDAR-8B-Chat` | 서버 모델 경로 |
-| `BLOCK_SIZE` | `32` | output block 크기 (토큰 수) |
-| `REQUEST_RATES` | `200` | 요청 속도 리스트 (공백 구분으로 sweep 가능) |
-| `NUM_THREADS_SWEEP` | `200` | admission window 값 리스트 (예: `50 100 150 200`) |
-| `SCHEDULER` | `FCFS` | scheduler 종류 (LST / PREFILL / DECODE / FCFS / SOLA / TTFB) |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MODEL_PATH` | `JetLM/SDAR-8B-Chat` | Model path for the server |
+| `BLOCK_SIZE` | `32` | Output block size (tokens) |
+| `REQUEST_RATES` | `200` | Request rate list (space-separated for sweep) |
+| `NUM_THREADS_SWEEP` | `200` | Admission window values to sweep (e.g. `50 100 150 200`) |
+| `SCHEDULER` | `FCFS` | Scheduler to use (LST / PREFILL / DECODE / FCFS / SOLA / TTFB) |
 | `STRICT_MULTIPLIER` | `10.0` | strict SLO = multiplier × ideal latency |
 | `RELEASE_MULTIPLIER` | `20.0` | release SLO = multiplier × ideal latency |
-| `NUM_EXAMPLES` | `200` | 태스크당 request 수 |
-| `WARMUP` | `32` | warmup request 수 |
-| `MAX_RUNNING_REQUESTS` | `32` | 서버 최대 동시 request 수 |
-| `OUTPUT_ROOT` | `/mnt/nvme0/kdg6245/dlm_tb_update_test` | 결과 저장 루트 |
+| `NUM_EXAMPLES` | `200` | Number of requests per task |
+| `WARMUP` | `32` | Number of warmup requests |
+| `MAX_RUNNING_REQUESTS` | `32` | Max concurrent requests on the server |
+| `OUTPUT_ROOT` | `/mnt/nvme0/kdg6245/dlm_tb_update_test` | Root directory for all outputs |
 
-### 내부 흐름
+### Internal Flow
 
 ```text
-이전 실행 OUTPUT_ROOT를 삭제
-  기본 OUTPUT_ROOT = /mnt/nvme0/kdg6245/dlm_tb_update_test
+Delete previous OUTPUT_ROOT
+  default OUTPUT_ROOT = /mnt/nvme0/kdg6245/dlm_tb_update_test
 
-Phase 1 — Benchmark 수집 (RATE × THREADS × TASK 순으로 반복)
+Phase 1 — benchmark collection (iterates over RATE × THREADS × TASK)
   for RATE in REQUEST_RATES:
     for THREADS in NUM_THREADS_SWEEP:
       for TASK in TASKS:
-        1. SLO 값 계산 (하드코딩된 ideal latency 기반)
-             strict_ttfb  = ideal_ttfb_ms(TASK)  × STRICT_MULTIPLIER  / 1000  [s]
-             strict_tpob  = ideal_tpob_ms(TASK)  × STRICT_MULTIPLIER  / 1000  [s]
-             release_ttfb = ideal_ttfb_ms(TASK)  × RELEASE_MULTIPLIER / 1000  [s]
-             release_tpob = ideal_tpob_ms(TASK)  × RELEASE_MULTIPLIER / 1000  [s]
-        2. dlm_algo_config.yaml 작성
-             bellman_log_file: OUT_DIR/bellman_log_<task>.jsonl 포함
-             SCHEDULER env var -> scheduler_mode (FCFS -> fcfs, LST -> lst, …)
-        3. sglang.launch_server 실행
+        1. Compute SLO values from hardcoded ideal latencies
+             strict_ttfb  = ideal_ttfb_ms(TASK) × STRICT_MULTIPLIER  / 1000  [s]
+             strict_tpob  = ideal_tpob_ms(TASK) × STRICT_MULTIPLIER  / 1000  [s]
+             release_ttfb = ideal_ttfb_ms(TASK) × RELEASE_MULTIPLIER / 1000  [s]
+             release_tpob = ideal_tpob_ms(TASK) × RELEASE_MULTIPLIER / 1000  [s]
+        2. Write dlm_algo_config.yaml
+             bellman_log_file: OUT_DIR/bellman_log_<task>.jsonl
+             SCHEDULER env var -> scheduler_mode (FCFS -> fcfs, LST -> lst, ...)
+        3. Launch sglang.launch_server
              --dllm-algorithm LowConfidence  --max-running-requests 32
-        4. dlm_benchmark.py 실행 (--log 포함)
-        5. STEP_LOG_FILE 복사 -> OUT_DIR/step_stats_<task>.jsonl
-        6. 서버 종료
+        4. Run dlm_benchmark.py (with --log)
+        5. Copy STEP_LOG_FILE -> OUT_DIR/step_stats_<task>.jsonl
+        6. Stop server
 
-Phase 2 — SLO rate 계산
+Phase 2 — SLO rate computation
   for RATE, TASK:
     dlm_slorate.py --latency-dir OUT_DIR -> OUT_DIR/slo_rates.json
 
-Phase 3 — Bellman 수렴 plot
+Phase 3 — Bellman convergence plots
   for RATE, TASK:
     plot_bellman_convergence.py
       --log-dir OUT_DIR  --tasks TASK
-      --output OUT_DIR/bellman_convergence.png
+      --output  OUT_DIR/bellman_convergence.png
 
 Phase 4 — Throughput summary (stdout)
-  <task>_<model_tag>.json에서 score, output_throughput_tok_s 집계 후 출력
+  Reads score and output_throughput_tok_s from <task>_<model_tag>.json and prints a table
 ```
 
-### 출력 구조
+### Output Structure
 
 ```text
 /mnt/nvme0/kdg6245/dlm_tb_update_test/
@@ -392,11 +393,11 @@ Phase 4 — Throughput summary (stdout)
       bellman_convergence.png
 ```
 
-중요한 파일:
+Key files:
 
-| 파일 | 설명 |
-|------|------|
-| `bellman_log_<task>.jsonl` | 서버가 매 step마다 기록하는 Bellman table 업데이트 로그. `plot_bellman_convergence.py`의 입력 |
-| `step_stats_<task>.jsonl` | per-batch-step 로그. `req_modes`, `block_steps` 포함 |
-| `slo_rates.json` | strict / relaxed SLO 달성률 |
-| `bellman_convergence.png` | Bellman table 추정값이 실제 step 분포에 수렴하는 과정 시각화 |
+| File | Description |
+|------|-------------|
+| `bellman_log_<task>.jsonl` | Per-step Bellman table update log written by the server; input to `plot_bellman_convergence.py` |
+| `step_stats_<task>.jsonl` | Per-batch-step log containing `req_modes` and `block_steps` |
+| `slo_rates.json` | Strict/relaxed SLO attainment rates |
+| `bellman_convergence.png` | Visualization of Bellman table estimates converging to the actual step distribution |
