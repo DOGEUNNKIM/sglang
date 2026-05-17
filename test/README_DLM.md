@@ -100,6 +100,26 @@ plot_bellman_convergence.py
 ./test/run_dlm_scheduler_comparison_SDAR.sh
 ```
 
+### 주요 파라미터
+
+두 스크립트는 모델 관련 기본값만 다르고 나머지는 동일하다.
+
+| 변수 | LLADA2 기본값 | SDAR 기본값 | 설명 |
+|------|--------------|------------|------|
+| `MODEL_PATH` | `inclusionAI/LLaDA2.0-mini` | `JetLM/SDAR-8B-Chat` | 서버 모델 경로 |
+| `FORWARD_TIME_S` | `0.04` | `0.08` | 한 번의 forward pass 예상 소요 시간 (s) |
+| `OUTPUT_ROOT` | `.../dlm_sched_comparison_LLADA2` | `.../dlm_sched_comparison_SDAR` | 결과 저장 루트 |
+| `BLOCK_SIZE` | `32` | `32` | output block 크기 (토큰 수) |
+| `TASKS` | `humaneval math gsm8k gpqa mmlu sharegpt ruler_4k` | 동일 | 비교 대상 태스크 목록 |
+| `RATES_<TASK>` | 태스크별 4개 값 (예: humaneval `10 12 14 16`) | 태스크별 4개 값 (예: humaneval `8 10 12 14`) | 태스크별 request rate sweep 값 |
+| `NUM_EXAMPLES_<TASK>` | `200` | `200` | 태스크당 request 수 |
+| `SCHEDULERS` | `TTFB DECODE LST SOLA FCFS PREFILL` | 동일 | 비교할 scheduler 목록 |
+| `STRICT_MULTIPLIER` | `10.0` | `10.0` | strict SLO = multiplier × ideal latency |
+| `RELEASE_MULTIPLIER` | `20.0` | `20.0` | release SLO = multiplier × ideal latency |
+| `MAX_RUNNING_REQUESTS` | `32` | `32` | 서버 최대 동시 request 수 |
+| `WARMUP` | `32` | `32` | warmup request 수 |
+| `TP_SIZE` | `1` | `1` | tensor parallelism 크기 |
+
 ### 내부 흐름
 
 ```text
@@ -174,6 +194,14 @@ Scheduler comparison Script가 만든 `slo_summary.json`과 `slo_config.json`으
 ./test/plot_dlm_scheduler_comparison_LLADA2.sh --bar-task humaneval --bar-rate 14
 ./test/plot_dlm_scheduler_comparison_SDAR.sh --bar-task humaneval --bar-rate 14
 ```
+
+### 주요 파라미터
+
+| 변수 | LLADA2 기본값 | SDAR 기본값 | 설명 |
+|------|--------------|------------|------|
+| `OUTPUT_ROOT` | `.../dlm_sched_comparison_LLADA2` | `.../dlm_sched_comparison_SDAR` | `slo_summary.json`과 `slo_config.json`을 읽고 PNG를 저장하는 루트 |
+
+CLI 인자(`--bar-task`, `--bar-rate` 등)는 `$@`로 `plot_dlm_scheduler_comparison.py`에 그대로 전달된다.
 
 ### 내부 흐름
 
