@@ -16,14 +16,14 @@ run_*.sh
 |------|------|
 | `run_dlm_scheduler_comparison_LLADA2.sh` | LLaDA2.0-mini scheduler 비교 실험 |
 | `run_dlm_scheduler_comparison_SDAR.sh` | SDAR-8B-Chat scheduler 비교 실험 |
+| `finalize_dlm_scheduler_comparison_LLADA2.sh` | LLADA2 결과 후처리 wrapper |
+| `finalize_dlm_scheduler_comparison_SDAR.sh` | SDAR 결과 후처리 wrapper |
+| `run_dlm_task_spec.sh` | task별 입력 길이, output block, step 분포 분석 |
+| `run_dlm_tb_update_test.sh` | Bellman table/TB update 동작 검증 |
 | `dlm_benchmark.py` | 실제 benchmark 실행 엔진. 서버에 요청을 보내고 per-task 결과를 저장 |
 | `dlm_slorate.py` | `request_latency_<task>.jsonl`에서 SLO 달성률 계산 |
 | `finalize_dlm_scheduler_comparison.py` | 끝난 scheduler 비교 결과를 다시 스캔해서 `slo_config.json`, `slo_summary.json`, plot 재생성 |
-| `finalize_dlm_scheduler_comparison_LLADA2.sh` | LLADA2 결과 후처리 wrapper |
-| `finalize_dlm_scheduler_comparison_SDAR.sh` | SDAR 결과 후처리 wrapper |
 | `plot_dlm_slo_summary.py` | `slo_summary.json` 기반 scheduler 비교 plot 생성 |
-| `run_dlm_task_spec.sh` | task별 입력 길이, output block, step 분포 분석 |
-| `run_dlm_tb_update_test.sh` | Bellman table/TB update 동작 검증 |
 | `plot_bellman_convergence.py` | `bellman_log_<task>.jsonl` 수렴 plot 생성 |
 | `plot_step_dist.py` | `step_stats_<task>.jsonl` 기반 step distribution plot |
 | `dlm_plot_steps.py` | standalone step plot utility. `summary_*.json` 또는 `steps_*.jsonl` 사용 |
