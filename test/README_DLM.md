@@ -243,7 +243,7 @@ output blocks per request distribution
 within-batch CoV of block steps
 ```
 
-## 7. Bellman Table / TB Update 테스트
+## 4. Bellman Table Update Script
 
 Bellman table update가 실제 step 분포에 수렴하는지 확인하는 것이다.
 
