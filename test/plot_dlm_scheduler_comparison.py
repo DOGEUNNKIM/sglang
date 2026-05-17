@@ -21,10 +21,10 @@ The expected input schema is:
 }
 
 Example:
-    python ~/sglang/test/plot_dlm_slo_summary.py \
+    python ~/sglang/test/plot_dlm_scheduler_comparison.py \
         --summary /tmp/dlm_sched_comparison/slo_summary.json
 
-    python ~/sglang/test/plot_dlm_slo_summary.py \
+    python ~/sglang/test/plot_dlm_scheduler_comparison.py \
         --metrics all ttfb tpob
 """
 
