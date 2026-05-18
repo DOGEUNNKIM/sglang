@@ -36,7 +36,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 import matplotlib.pyplot as plt
 
 
-DEFAULT_SCHEDULER_ORDER = ["TTFB","DECODE", "LST", "SOLA", "FCFS", "PREFILL"]
+DEFAULT_SCHEDULER_ORDER = ["TTFB", "DECODE", "LST", "SOLA", "FCFS", "PREFILL"]
 
 STYLE = {
     "DECODE": {"label": "DECODE", "color": "#DD8452", "marker": "s", "linestyle": "-"},
