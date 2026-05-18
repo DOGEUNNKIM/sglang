@@ -78,19 +78,6 @@ class SchedulerDllmMixin:
         # Initialize DLLM manager and transfer requests
         self.dllm_manager.init_next_round()
 
-        # Fast path: every active request is mid-block (STAGING_DECODE) and no new
-        # requests are waiting to be admitted.  The batch composition is identical
-        # to the previous step — skip sort / priority / TP-sync / pressure
-        # computation and build the batch directly.
-        if False and self._is_all_staging_decode():
-            return self._get_new_batch_staging_decode_fast(
-                adder, running_bs, schedule_start_time, schedule_timing
-            )
-
-        # Batch composition changed (new admissions, block completions, etc.) —
-        # the cached staging-decode batch tensors are no longer valid.
-        self._prev_staging_decode_batch = None
-
         self.policy.calc_priority(self.waiting_queue)
 
         phase_start_time = time.perf_counter()
@@ -98,12 +85,27 @@ class SchedulerDllmMixin:
         schedule_timing["fetch_waiting_s"] = (
             time.perf_counter() - phase_start_time
         )
-        phase_start_time = time.perf_counter()
-        self._sort_dllm_by_laxity()
-        schedule_timing["sort_laxity_s"] = time.perf_counter() - phase_start_time
-        phase_start_time = time.perf_counter()
-        self._sync_dllm_lst_order_across_tp()
-        schedule_timing["tp_sync_order_s"] = time.perf_counter() - phase_start_time
+
+        order_fast_path = self._can_skip_dllm_order_update()
+        if order_fast_path:
+            # Membership and deadline-relevant phase state are unchanged.  Keep
+            # the existing LST order, but still run normal batch selection below.
+            schedule_timing["sort_laxity_s"] = 0.0
+            schedule_timing["tp_sync_order_s"] = 0.0
+        else:
+            # Order may change due to new admissions, block completions, or phase
+            # transitions.  Do not reuse the previous decode batch this round.
+            self._prev_staging_decode_batch = None
+            phase_start_time = time.perf_counter()
+            self._sort_dllm_by_laxity()
+            schedule_timing["sort_laxity_s"] = (
+                time.perf_counter() - phase_start_time
+            )
+            phase_start_time = time.perf_counter()
+            self._sync_dllm_lst_order_across_tp()
+            schedule_timing["tp_sync_order_s"] = (
+                time.perf_counter() - phase_start_time
+            )
 
         # Process batches
         phase_start_time = time.perf_counter()
@@ -122,9 +124,22 @@ class SchedulerDllmMixin:
 
         # Create and prepare batch
         batch_phase = self._get_dllm_batch_phase(can_run_list)
+        staging_decode_prev_batch = (
+            self._get_reusable_staging_decode_batch(can_run_list)
+            if order_fast_path
+            else None
+        )
         phase_start_time = time.perf_counter()
-        new_batch = self._create_dllm_batch(can_run_list, ForwardMode.DLLM_EXTEND)
+        new_batch = self._create_dllm_batch(
+            can_run_list,
+            ForwardMode.DLLM_EXTEND,
+            staging_decode_prev_batch=staging_decode_prev_batch,
+        )
         schedule_timing["batch_build_s"] = time.perf_counter() - phase_start_time
+        if self._is_reusable_staging_decode_batch(can_run_list):
+            self._prev_staging_decode_batch = new_batch
+        else:
+            self._prev_staging_decode_batch = None
         self._annotate_dllm_batch_metrics(
             new_batch,
             batch_phase=batch_phase,
@@ -147,60 +162,34 @@ class SchedulerDllmMixin:
             return False
         return all(req.dllm_phase == DllmReqPhase.STAGING_DECODE for req in waiting)
 
-    def _get_new_batch_staging_decode_fast(
-        self: Scheduler,
-        adder: PrefillAdder,
-        running_bs: int,
-        schedule_start_time: float,
-        schedule_timing: dict,
+    def _can_skip_dllm_order_update(self: Scheduler) -> bool:
+        """True when the current LST order can be reused for this scheduling step."""
+        return (
+            not self.dllm_manager.queue_dirty
+            and self._is_all_staging_decode()
+        )
+
+    def _is_reusable_staging_decode_batch(self: Scheduler, reqs: List[Req]) -> bool:
+        """True when a batch only contains active mid-block decode requests."""
+        return bool(reqs) and all(
+            req.dllm_phase == DllmReqPhase.STAGING_DECODE
+            and req.has_dllm_active_block()
+            for req in reqs
+        )
+
+    def _get_reusable_staging_decode_batch(
+        self: Scheduler, can_run_list: List[Req]
     ) -> Optional[ScheduleBatch]:
-        """Build a decode batch directly when all requests are mid-block STAGING_DECODE.
-
-        Skips sort / priority / TP-sync / pressure computation.
-        Called only when _is_all_staging_decode() is True.
-        """
-        for req in self.dllm_manager.waiting_queue:
-            req.dllm_scheduled_source_phase = req.dllm_phase
-            self._restore_dllm_active_prefix_indices(req)
-            res = adder.add_dllm_staging_req(req)
-            req.dllm_scheduled_exec_phase = req.dllm_phase
-            if res == AddReqResult.NO_TOKEN:
-                break
-
-        can_run_list = adder.can_run_list
-        if not can_run_list:
-            return None
-
-        set_time_batch(can_run_list, "set_forward_entry_time")
-        self._update_state_for_batch(can_run_list, adder, running_bs)
-
-        phase_start_time = time.perf_counter()
-        # Reuse the previous batch's invariant tensors when the batch composition
-        # hasn't changed and every request still has an active block (same block
-        # being unmasked).  This skips alloc_for_extend() — in particular the
-        # write_cache_indices Triton kernel — since KV slot assignments are
-        # unchanged while a block's unmasking is in progress.
+        """Return the previous decode batch only when the request order is identical."""
         prev = self._prev_staging_decode_batch
-        can_fast_prep = (
+        if (
             prev is not None
+            and self._is_reusable_staging_decode_batch(can_run_list)
             and len(prev.reqs) == len(can_run_list)
             and all(p.rid == c.rid for p, c in zip(prev.reqs, can_run_list))
-            and all(req.has_dllm_active_block() for req in can_run_list)
-        )
-        new_batch = self._create_dllm_batch(
-            can_run_list,
-            ForwardMode.DLLM_EXTEND,
-            staging_decode_prev_batch=prev if can_fast_prep else None,
-        )
-        schedule_timing["batch_build_s"] = time.perf_counter() - phase_start_time
-        self._prev_staging_decode_batch = new_batch
-        self._annotate_dllm_batch_metrics(
-            new_batch,
-            batch_phase="decode",
-            schedule_start_time=schedule_start_time,
-            schedule_timing=schedule_timing,
-        )
-        return new_batch
+        ):
+            return prev
+        return None
 
     def process_batch_result_dllm(
         self: Scheduler,

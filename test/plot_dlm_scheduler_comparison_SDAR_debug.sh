@@ -9,4 +9,4 @@ python ./test/plot_dlm_scheduler_comparison.py \
     --slo-config "${OUTPUT_ROOT}/slo_config.json" \
     --p99-normalize-baseline LST \
     --bar-task gsm8k \
-    --bar-rate 6
+    --bar-rate 4
