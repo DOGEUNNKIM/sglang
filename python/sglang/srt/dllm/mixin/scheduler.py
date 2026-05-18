@@ -82,7 +82,7 @@ class SchedulerDllmMixin:
         # requests are waiting to be admitted.  The batch composition is identical
         # to the previous step — skip sort / priority / TP-sync / pressure
         # computation and build the batch directly.
-        if self._is_all_staging_decode():
+        if False and self._is_all_staging_decode():
             return self._get_new_batch_staging_decode_fast(
                 adder, running_bs, schedule_start_time, schedule_timing
             )

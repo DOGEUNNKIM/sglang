@@ -8,8 +8,8 @@ BLOCK_SIZE="${BLOCK_SIZE:-32}"
 TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu sharegpt ruler_4k}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
 # TP = 1 batch = 32 block_size = 32 일때
 RATES_GSM8K="${RATES_GSM8K:-3 4 5 6}" # 완전 결정
-RATES_MMLU="${RATES_MMLU:-1 1.2 1.4 1.6}" # 완전 결정
-RATES_HUMANEVAL="${RATES_HUMANEVAL:-4 6 8 10}" # 완전 결정
+RATES_MMLU="${RATES_MMLU:-1.2 1.4 1.6 1.8}" # 완전 결정
+RATES_HUMANEVAL="${RATES_HUMANEVAL:-8 10 12 14}" # 완전 결정
 RATES_MATH="${RATES_MATH:-1 1.2 1.4 1.6}" # 완전 결정
 RATES_GPQA="${RATES_GPQA:-0.6 0.8 1.0 1.2}" # 완전 결정
 RATES_SHAREGPT="${RATES_SHAREGPT:-1.5 2 2.5 3}" # 완전 결정
@@ -344,7 +344,7 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
                 --cuda-graph-max-bs "${MAX_RUNNING_REQUESTS}" \
                 --disable-cuda-graph-padding \
                 --tp-size "${TP_SIZE}" \
-                --mem-fraction-static 0.85 \
+                --mem-fraction-static 0.95 \
                 >> "${RUN_SERVER_LOG}" 2>&1 &
             SERVER_PID=$!
 

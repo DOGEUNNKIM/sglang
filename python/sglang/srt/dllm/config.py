@@ -51,9 +51,10 @@ class DllmConfig:
         self.bellman_alpha: float = max(self.bellman_alpha_min, self.bellman_alpha0)
 
         # V[r] = estimated forward passes to finish a block with r masks remaining.
-        # Initialized to r+1; updated online via adaptive stochastic median.
+        # Initialized to r/2 (neutral prior: ~half masks resolved per forward).
+        # Updated online via adaptive stochastic median.
         self.decode_forwards_by_remaining: list[float] = [
-            float(remaining + 1)
+            float(remaining) / 2.0 + 1.0
             for remaining in range(self.block_size + 1)
         ]
         self._update_counts: list[int] = [0] * (self.block_size + 1)

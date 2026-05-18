@@ -1,35 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_PATH="${MODEL_PATH:-inclusionAI/LLaDA2.0-mini}"
+MODEL_PATH="${MODEL_PATH:-JetLM/SDAR-8B-Chat}"
 BLOCK_SIZE="${BLOCK_SIZE:-32}"
 
 ################################
-TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu sharegpt ruler_4k})  ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
-# TP = 1일때 batch 32
-RATES_GSM8K="${RATES_GSM8K:-8 10 12 14}" # 완전 결정
-RATES_MMLU="${RATES_MMLU:-2 2.5 3 3.5}" # 완전 결정
-RATES_HUMANEVAL="${RATES_HUMANEVAL:-14 15 16 17}" # 완전 결정
-RATES_MATH="${RATES_MATH:-3 3.5 4 4.5}" # 완전 결정
-RATES_GPQA="${RATES_GPQA:-1 1.5 2 2.5}" # 완전 결정
-RATES_SHAREGPT="${RATES_SHAREGPT:-1 1.5 2 2.5}" # 완전 결정
-RATES_RULER_4K="${RATES_RULER_4K:-2.5 3 3.5 4}" # 완전 결정
+TASKS=(${TASKS:-gsm8k}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
+# TP = 1 batch = 32 block_size = 32 일때
+RATES_GSM8K="${RATES_GSM8K:-6}" # 완전 결정
+RATES_MMLU="${RATES_MMLU:-1.2 1.4 1.6 1.8}" # 완전 결정
+RATES_HUMANEVAL="${RATES_HUMANEVAL:-8 10 12 14}" # 완전 결정
+RATES_MATH="${RATES_MATH:-1 1.2 1.4 1.6}" # 완전 결정
+RATES_GPQA="${RATES_GPQA:-0.6 0.8 1.0 1.2}" # 완전 결정
+RATES_SHAREGPT="${RATES_SHAREGPT:-1.5 2 2.5 3}" # 완전 결정
+RATES_RULER_4K="${RATES_RULER_4K:-2 2.5 3 3.5}" # 완전 결정
+# TP = 2일때
+#RATES_GSM8K="${RATES_GSM8K:-4 4.5 5 5.5}" # 결정
+#RATES_MMLU="${RATES_MMLU:-1 1.2 1.4 1.6}" # 결정
+#RATES_HUMANEVAL="${RATES_HUMANEVAL:-12 16 20 24}" # 결정
+#RATES_MATH="${RATES_MATH:-0.4 0.6 0.8 1}" # 결정
+#RATES_GPQA="${RATES_GPQA:-0.4 0.6 0.8 1}" # 결정
+#RATES_SHAREGPT="${RATES_SHAREGPT:-1 1.5 2 2.5}" # 결정
+#RATES_RULER_4K="${RATES_RULER_4K:-1 1.2 1.4 1.6}"  # 결정
 RATES_RULER_8K="${RATES_RULER_8K:-0.5 0.75 1 1.25}"
 RATES_RULER_16K="${RATES_RULER_16K:-0.5 0.75 1 1.25}"
 RATES_LONGBENCH_V2="${RATES_LONGBENCH_V2:-1 1.5 2 2.5}"
-# TP = 2일때
-#RATES_GSM8K="${RATES_GSM8K:-6 7 8 9}"
-#RATES_MMLU="${RATES_MMLU:-1 1.5 2 2.5}"
-#RATES_HUMANEVAL="${RATES_HUMANEVAL:-12 16 20 24}"
-#RATES_MATH="${RATES_MATH:-0.5 1 1.5 2}"
-#RATES_GPQA="${RATES_GPQA:-0.5 1 1.5 2}"
-#RATES_SHAREGPT="${RATES_SHAREGPT:-2 2.5 3 3.5}"
-#RATES_RULER_4K="${RATES_RULER_4K:-3.5 4 4.5 5}"
-#RATES_RULER_8K="${RATES_RULER_8K:-0.5 0.75 1 1.25}"
-#RATES_RULER_16K="${RATES_RULER_16K:-0.5 0.75 1 1.25}"
-#RATES_LONGBENCH_V2="${RATES_LONGBENCH_V2:-1 1.5 2 2.5}"
 # Per-task example cap (empty = full dataset). Override via env, e.g. NUM_EXAMPLES_MATH=100.
-NUM_EXAMPLES_GSM8K="${NUM_EXAMPLES_GSM8K:-200}"
+NUM_EXAMPLES_GSM8K="${NUM_EXAMPLES_GSM8K:-600}"
 NUM_EXAMPLES_HUMANEVAL="${NUM_EXAMPLES_HUMANEVAL:-200}"
 NUM_EXAMPLES_MATH="${NUM_EXAMPLES_MATH:-200}"
 NUM_EXAMPLES_GPQA="${NUM_EXAMPLES_GPQA:-200}"
@@ -39,21 +36,20 @@ NUM_EXAMPLES_RULER_4K="${NUM_EXAMPLES_RULER_4K:-200}"
 NUM_EXAMPLES_LONGBENCH_V2="${NUM_EXAMPLES_LONGBENCH_V2:-}"
 NUM_EXAMPLES_RULER_8K="${NUM_EXAMPLES_RULER_8K:-200}"
 NUM_EXAMPLES_RULER_16K="${NUM_EXAMPLES_RULER_16K:-200}"
-SCHEDULERS=(${SCHEDULERS:-TTFB DECODE LST SOLA FCFS PREFILL}) # TTFB DECODE LST SOLA FCFS PREFILL
+SCHEDULERS=(${SCHEDULERS:-TTFB DECODE LST}) # TTFB DECODE LST SOLA FCFS PREFILL
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-10.0}"
 RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-20.0}"
 STRICT_PROB="${STRICT_PROB:-1}"
 #TP가 2, batch 32이면 Forward 0.03
-#TP가 1, batch 32이면 Forward 0.04
-#TP가 1, batch 16이면 Forward 0.03
+#TP가 1, batch 32이면 Forward 0.08
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-32}"
 WARMUP="${WARMUP:-32}"
 TP_SIZE="${TP_SIZE:-1}" 
-FORWARD_TIME_S="${FORWARD_TIME_S:-0.04}"
+FORWARD_TIME_S="${FORWARD_TIME_S:-0.08}"
 ################################
 
 SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/nvme0/kdg6245}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRATCH_ROOT}/dlm_sched_comparison_LLADA2}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRATCH_ROOT}/dlm_sched_comparison_SDAR_debug}"
 
 if [[ -d "${OUTPUT_ROOT}" ]]; then
     echo "[clean] removing previous results under ${OUTPUT_ROOT}"
@@ -64,15 +60,15 @@ NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 # NUM_THREADS / DLLM_ADMISSION_WINDOW: when unset, auto-detected from full dataset size per task.
 NUM_THREADS="${NUM_THREADS:-}"
 DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-}"
-PORT="${PORT:-30002}"
+PORT="${PORT:-50003}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 THRESHOLD="${THRESHOLD:-0.95}"
 PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"
 DECODE_FORWARD_TIME_S="${DECODE_FORWARD_TIME_S:-}"
-CONFIG_PATH="${CONFIG_PATH:-${OUTPUT_ROOT}/dlm_algo_config_sched_cmp_LLADA2.yaml}"
-STEP_LOG_FILE="${STEP_LOG_FILE:-${OUTPUT_ROOT}/dlm_step_stats_LLADA2.jsonl}"
-REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-${OUTPUT_ROOT}/dlm_request_latency_LLADA2.jsonl}"
-BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-${OUTPUT_ROOT}/dlm_batch_latency_LLADA2.jsonl}"
+CONFIG_PATH="${CONFIG_PATH:-${OUTPUT_ROOT}/dlm_algo_config_sched_cmp_SDAR.yaml}"
+STEP_LOG_FILE="${STEP_LOG_FILE:-${OUTPUT_ROOT}/dlm_step_stats_SDAR.jsonl}"
+REQUEST_LATENCY_LOG_FILE="${REQUEST_LATENCY_LOG_FILE:-${OUTPUT_ROOT}/dlm_request_latency_SDAR.jsonl}"
+BATCH_LATENCY_LOG_FILE="${BATCH_LATENCY_LOG_FILE:-${OUTPUT_ROOT}/dlm_batch_latency_SDAR.jsonl}"
 export STEP_LOG_FILE REQUEST_LATENCY_LOG_FILE BATCH_LATENCY_LOG_FILE
 GPU_FREE_MEMORY_MIN_MB="${GPU_FREE_MEMORY_MIN_MB:-70000}"
 
@@ -383,14 +379,14 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
     # After TTFB scheduler: extract ideal_ttfb from highest rate (dlm_benchmark internal)
     if [[ "${SCHEDULER}" == "TTFB" ]]; then
         echo
-        echo "[ideal] TTFB sched done — extracting p50_ideal_ttfb_ms at highest rate per task"
+        echo "[ideal] TTFB sched done — extracting mean_ideal_ttfb_ms at highest rate per task"
         for TASK in "${TASKS[@]}"; do
             _rates=($(_task_rates "${TASK}"))
             _high_rate="${_rates[-1]}"
             _out="${OUTPUT_ROOT}/scheduler_TTFB/request_rate_${_high_rate}/${TASK}"
-            _val=$(_parse_calib_metric "${_out}" "${TASK}" "p50_ideal_ttfb_ms")
+            _val=$(_parse_calib_metric "${_out}" "${TASK}" "mean_ideal_ttfb_ms")
             if [[ -z "${_val}" ]]; then
-                echo "[ideal] WARNING: p50_ideal_ttfb_ms not found for task=${TASK} rate=${_high_rate}" >&2
+                echo "[ideal] WARNING: mean_ideal_ttfb_ms not found for task=${TASK} rate=${_high_rate}" >&2
             fi
             IDEAL_TTFB_MS["${TASK}"]="${_val:-}"
             echo "  task=${TASK}  rate=${_high_rate}  ideal_ttfb=${_val:-N/A}ms"
@@ -400,14 +396,14 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
     # After DECODE scheduler: extract ideal_tpob from highest rate (dlm_benchmark internal)
     if [[ "${SCHEDULER}" == "DECODE" ]]; then
         echo
-        echo "[ideal] DECODE sched done — extracting p50_ideal_tpob_ms at highest rate per task"
+        echo "[ideal] DECODE sched done — extracting mean_ideal_tpob_ms at highest rate per task"
         for TASK in "${TASKS[@]}"; do
             _rates=($(_task_rates "${TASK}"))
             _high_rate="${_rates[-1]}"
             _out="${OUTPUT_ROOT}/scheduler_DECODE/request_rate_${_high_rate}/${TASK}"
-            _val=$(_parse_calib_metric "${_out}" "${TASK}" "p50_ideal_tpob_ms")
+            _val=$(_parse_calib_metric "${_out}" "${TASK}" "mean_ideal_tpob_ms")
             if [[ -z "${_val}" ]]; then
-                echo "[ideal] WARNING: p50_ideal_tpob_ms not found for task=${TASK} rate=${_high_rate}" >&2
+                echo "[ideal] WARNING: mean_ideal_tpob_ms not found for task=${TASK} rate=${_high_rate}" >&2
             fi
             IDEAL_TPOB_MS["${TASK}"]="${_val:-}"
             echo "  task=${TASK}  rate=${_high_rate}  ideal_tpob=${_val:-N/A}ms"
