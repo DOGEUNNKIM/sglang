@@ -6,14 +6,15 @@ BLOCK_SIZE="${BLOCK_SIZE:-32}"
 
 ################################
 TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu sharegpt ruler_4k})  ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
+RETRY_TASKS=(${RETRY_TASKS:-gsm8k humaneval sharegpt ruler_4k})  # empty = full run; e.g. RETRY_TASKS="gsm8k math" to re-run only those tasks
 # TP = 1일때 batch 32
-RATES_GSM8K="${RATES_GSM8K:-8 10 12 14}" # 완전 결정
-RATES_MMLU="${RATES_MMLU:-2 2.5 3 3.5}" # 완전 결정
-RATES_HUMANEVAL="${RATES_HUMANEVAL:-14 15 16 17}" # 완전 결정
-RATES_MATH="${RATES_MATH:-3 3.5 4 4.5}" # 완전 결정
-RATES_GPQA="${RATES_GPQA:-1 1.5 2 2.5}" # 완전 결정
-RATES_SHAREGPT="${RATES_SHAREGPT:-1 1.5 2 2.5}" # 완전 결정
-RATES_RULER_4K="${RATES_RULER_4K:-2.5 3 3.5 4}" # 완전 결정
+RATES_GSM8K="${RATES_GSM8K:-12 14 16 18}" # 수정
+RATES_MMLU="${RATES_MMLU:-2 2.5 3 3.5}" 
+RATES_HUMANEVAL="${RATES_HUMANEVAL:-16 20 24 28}" # 수정
+RATES_MATH="${RATES_MATH:-3 3.5 4 4.5}"
+RATES_GPQA="${RATES_GPQA:-1 1.5 2 2.5}"
+RATES_SHAREGPT="${RATES_SHAREGPT:-1.5 2 2.5 3}" # 수정
+RATES_RULER_4K="${RATES_RULER_4K:-3 4 5 6}" # 수정
 RATES_RULER_8K="${RATES_RULER_8K:-0.5 0.75 1 1.25}"
 RATES_RULER_16K="${RATES_RULER_16K:-0.5 0.75 1 1.25}"
 RATES_LONGBENCH_V2="${RATES_LONGBENCH_V2:-1 1.5 2 2.5}"
@@ -55,7 +56,7 @@ FORWARD_TIME_S="${FORWARD_TIME_S:-0.04}"
 SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/nvme0/kdg6245}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRATCH_ROOT}/dlm_sched_comparison_LLADA2}"
 
-if [[ -d "${OUTPUT_ROOT}" ]]; then
+if [[ "${#RETRY_TASKS[@]}" -eq 0 && -d "${OUTPUT_ROOT}" ]]; then
     echo "[clean] removing previous results under ${OUTPUT_ROOT}"
     rm -rf "${OUTPUT_ROOT}"
 fi
@@ -269,9 +270,32 @@ _task_rates() {
     esac
 }
 
+_in_retry_tasks() {
+    local _t="${1}"
+    for _r in "${RETRY_TASKS[@]}"; do [[ "${_r}" == "${_t}" ]] && return 0; done
+    return 1
+}
+
+# Selective cleanup for retry mode
+if [[ "${#RETRY_TASKS[@]}" -gt 0 && -d "${OUTPUT_ROOT}" ]]; then
+    echo "[clean] retry mode — removing results for tasks: ${RETRY_TASKS[*]}"
+    for _task in "${RETRY_TASKS[@]}"; do
+        for _dir in "${OUTPUT_ROOT}"/scheduler_*/request_rate_*/"${_task}"; do
+            if [[ -d "${_dir}" ]]; then
+                echo "[clean]   rm -rf ${_dir}"
+                rm -rf "${_dir}"
+            fi
+        done
+    done
+fi
+
 # ── Main comparison ──────────────────────────────────────────────────────────
 for SCHEDULER in "${SCHEDULERS[@]}"; do
     for TASK in "${TASKS[@]}"; do
+        if [[ "${#RETRY_TASKS[@]}" -gt 0 ]] && ! _in_retry_tasks "${TASK}"; then
+            echo "[retry] skipping task=${TASK} (not in RETRY_TASKS)"
+            continue
+        fi
         _rates=($(_task_rates "${TASK}"))
         for RATE in "${_rates[@]}"; do
         OUT_DIR="${OUTPUT_ROOT}/scheduler_${SCHEDULER}/request_rate_${RATE}/${TASK}"
