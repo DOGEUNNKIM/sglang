@@ -1119,9 +1119,9 @@ def print_latency_summary(task: str, summary: Dict[str, Any]) -> None:
                 ("TTFB mean", "mean_ttfb_ms"),
                 ("TTFB p95", "p95_ttfb_ms"),
                 ("TTFB p99", "p99_ttfb_ms"),
-                ("max TPOB mean", "mean_tpob_ms"),
-                ("max TPOB p95", "p95_tpob_ms"),
-                ("max TPOB p99", "p99_tpob_ms"),
+                ("mean TPOB mean", "mean_tpob_ms"),
+                ("mean TPOB p95", "p95_tpob_ms"),
+                ("mean TPOB p99", "p99_tpob_ms"),
             ],
         ),
         (
@@ -1208,7 +1208,7 @@ def summarize_latency_metrics(
     batch_records = _unique_batch_records(batch_records)
 
     ttfb_ms = _values(request_records, "ttfb_ms")
-    tpob_ms = _values(request_records, "tpob_ms")
+    tpob_ms = _values(request_records, "mean_tpob_ms")
     sched_wait_ms = _values(request_records, "sched_wait_ms")
     decode_delay_ms = _values(request_records, "decode_delay_ms")
     first_unmask_gap_ms = _values(request_records, "first_unmask_gap_ms")
@@ -1757,7 +1757,7 @@ def plot_tpob_per_request(
     tasks = [
         task
         for task, data in latency_data.items()
-        if any("tpob_ms" in r for r in data.get("request", []))
+        if any("mean_tpob_ms" in r for r in data.get("request", []))
     ]
     if not tasks:
         print("[plot] no tpob_ms data in request latency log — skipping")
@@ -1772,7 +1772,7 @@ def plot_tpob_per_request(
 
     for ax, task in zip(axes, tasks):
         records = latency_data[task].get("request", [])
-        tpob_vals = [r["tpob_ms"] for r in records if r.get("tpob_ms") is not None]
+        tpob_vals = [r["mean_tpob_ms"] for r in records if r.get("mean_tpob_ms") is not None]
         if not tpob_vals:
             ax.text(0.5, 0.5, "No data", ha="center", va="center",
                     transform=ax.transAxes)
@@ -1842,7 +1842,7 @@ def plot_request_slo_scatter(
         if slo.get("strict_ttfb_slo_ms") is None or slo.get("strict_tpob_slo_ms") is None:
             continue
         if any(
-            r.get("ttfb_ms") is not None and r.get("tpob_ms") is not None
+            r.get("ttfb_ms") is not None and r.get("mean_tpob_ms") is not None
             for r in data.get("request", [])
         ):
             tasks.append(task)
@@ -1878,7 +1878,7 @@ def plot_request_slo_scatter(
         tier_points: Dict[str, list] = {"strict": [], "release": [], "unknown": []}
         for r in records:
             ttfb_ms = r.get("ttfb_ms")
-            tpob_ms = r.get("tpob_ms")
+            tpob_ms = r.get("mean_tpob_ms")
             if ttfb_ms is None or tpob_ms is None:
                 continue
             tier = r.get("slo_type") or "unknown"
@@ -1971,7 +1971,7 @@ def plot_request_raw_scatter(
     tasks = []
     for task, data in latency_data.items():
         if any(
-            r.get("ttfb_ms") is not None and r.get("tpob_ms") is not None
+            r.get("ttfb_ms") is not None and r.get("mean_tpob_ms") is not None
             for r in data.get("request", [])
         ):
             tasks.append(task)
@@ -2005,7 +2005,7 @@ def plot_request_raw_scatter(
         tier_points: Dict[str, list] = {"strict": [], "release": [], "unknown": []}
         for r in records:
             ttfb_ms = r.get("ttfb_ms")
-            tpob_ms = r.get("tpob_ms")
+            tpob_ms = r.get("mean_tpob_ms")
             if ttfb_ms is None or tpob_ms is None:
                 continue
             tier = (r.get("slo_type") or "unknown") if has_slo else "unknown"
@@ -2372,7 +2372,7 @@ def plot_latency_metrics(
     fig, axes = plt.subplots(1, 2, figsize=(max(8, 2.8 * len(tasks) + 3), 4))
     for ax, key, title in [
         (axes[0], "ttfb_ms", "TTFB per request"),
-        (axes[1], "tpob_ms", "Max TPOB per request"),
+        (axes[1], "mean_tpob_ms", "Mean TPOB per request"),
     ]:
         plot_tasks = [
             task for task in tasks if _values(latency_data[task]["request"], key)

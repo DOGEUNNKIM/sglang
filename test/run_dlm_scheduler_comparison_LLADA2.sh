@@ -6,9 +6,9 @@ BLOCK_SIZE="${BLOCK_SIZE:-32}"
 
 ################################
 TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu sharegpt ruler_4k})  ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
-RETRY_TASKS=(${RETRY_TASKS:-gsm8k humaneval sharegpt ruler_4k})  # empty = full run; e.g. RETRY_TASKS="gsm8k math" to re-run only those tasks
+RETRY_TASKS=(${RETRY_TASKS:-humaneval math gsm8k gpqa mmlu sharegpt ruler_4k})  # empty = full run; e.g. RETRY_TASKS="gsm8k math" to re-run only those tasks
 # TP = 1일때 batch 32
-RATES_GSM8K="${RATES_GSM8K:-12 14 16 18}" # 수정
+RATES_GSM8K="${RATES_GSM8K:-10 12 14 16}" # 수정
 RATES_MMLU="${RATES_MMLU:-2 2.5 3 3.5}" 
 RATES_HUMANEVAL="${RATES_HUMANEVAL:-16 20 24 28}" # 수정
 RATES_MATH="${RATES_MATH:-3 3.5 4 4.5}"
@@ -56,9 +56,8 @@ FORWARD_TIME_S="${FORWARD_TIME_S:-0.04}"
 SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/nvme0/kdg6245}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRATCH_ROOT}/dlm_sched_comparison_LLADA2}"
 
-if [[ "${#RETRY_TASKS[@]}" -eq 0 && -d "${OUTPUT_ROOT}" ]]; then
-    echo "[clean] removing previous results under ${OUTPUT_ROOT}"
-    rm -rf "${OUTPUT_ROOT}"
+if [[ "${#RETRY_TASKS[@]}" -eq 0 ]]; then
+    echo "[plot-only] RETRY_TASKS is empty — skipping all benchmark runs, plot only"
 fi
 REQUEST_RATES=(${REQUEST_RATES:-})  # fallback when task has no per-task rates
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
@@ -292,7 +291,10 @@ fi
 # ── Main comparison ──────────────────────────────────────────────────────────
 for SCHEDULER in "${SCHEDULERS[@]}"; do
     for TASK in "${TASKS[@]}"; do
-        if [[ "${#RETRY_TASKS[@]}" -gt 0 ]] && ! _in_retry_tasks "${TASK}"; then
+        if [[ "${#RETRY_TASKS[@]}" -eq 0 ]]; then
+            continue
+        fi
+        if ! _in_retry_tasks "${TASK}"; then
             echo "[retry] skipping task=${TASK} (not in RETRY_TASKS)"
             continue
         fi
