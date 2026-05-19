@@ -383,7 +383,7 @@ class ShareGPTEval:
             data for data in dataset
             if len(data.get("conversations", data.get("conversation", []))) >= 1
         ]
-        random.shuffle(dataset)
+        random.Random(42).shuffle(dataset)
 
         self.examples = []
         for data in dataset:
