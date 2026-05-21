@@ -7,7 +7,7 @@ set -euo pipefail
 DLM_MODEL="${DLM_MODEL:-inclusionAI/LLaDA2.0-mini}"
 LLM_MODEL="${LLM_MODEL:-inclusionAI/Ling-mini-2.0}"
 BLOCK_SIZE="${BLOCK_SIZE:-32}"
-TP_SIZE="${TP_SIZE:-1}"
+TP_SIZE="${TP_SIZE:-4}"
 DLM_MAX_RUNNING_REQUESTS="${DLM_MAX_RUNNING_REQUESTS:-64}"
 LLM_MAX_RUNNING_REQUESTS="${LLM_MAX_RUNNING_REQUESTS:-164}"
 WARMUP="${WARMUP:-32}"
@@ -18,8 +18,8 @@ LLM_RATES="${LLM_RATES:-164}"
 NUM_EXAMPLES="${NUM_EXAMPLES:-164}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 
-DLM_PORT="${DLM_PORT:-31000}"
-LLM_PORT="${LLM_PORT:-32000}"
+DLM_PORT="${DLM_PORT:-30007}"
+LLM_PORT="${LLM_PORT:-30008}"
 SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/nvme0/kdg6245}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRATCH_ROOT}/dlm_llm_comparison}"
 
@@ -103,6 +103,8 @@ trap stop_server EXIT
 # ──────────────────────────────────────────────────────────────────────────────
 # Setup
 # ──────────────────────────────────────────────────────────────────────────────
+echo "[init] removing previous output: ${OUTPUT_ROOT}"
+rm -rf "${OUTPUT_ROOT}"
 mkdir -p "${OUTPUT_ROOT}"
 
 # Kill stale servers on both ports
@@ -163,7 +165,7 @@ EOF
         --cuda-graph-max-bs "${DLM_MAX_RUNNING_REQUESTS}" \
         --disable-cuda-graph-padding \
         --tp-size "${TP_SIZE}" \
-        --mem-fraction-static 0.95 \
+        --mem-fraction-static 0.8 \
         >> "${OUT_DIR}/server.log" 2>&1 &
     SERVER_PID=$!
 
@@ -214,7 +216,7 @@ for RATE in "${_llm_rates[@]}"; do
         --attention-backend flashinfer \
         --max-running-requests "${LLM_MAX_RUNNING_REQUESTS}" \
         --tp-size "${TP_SIZE}" \
-        --mem-fraction-static 0.95 \
+        --mem-fraction-static 0.8 \
         >> "${OUT_DIR}/server.log" 2>&1 &
     SERVER_PID=$!
 

@@ -102,7 +102,9 @@ def plot_convergence(args):
     fig, axes = plt.subplots(2, len(tasks), figsize=(5 * len(tasks), 8), squeeze=False)
 
     for col, task in enumerate(tasks):
-        log_path = log_dir / f"bellman_log_{task}.jsonl"
+        log_path = log_dir / task / f"bellman_log_{task}.jsonl"
+        if not log_path.exists():
+            log_path = log_dir / f"bellman_log_{task}.jsonl"
         ax_mae = axes[0][col]
         ax_tbl = axes[1][col]
 

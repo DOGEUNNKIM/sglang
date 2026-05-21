@@ -8,13 +8,13 @@ BLOCK_SIZE="${BLOCK_SIZE:-32}"
 TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu sharegpt ruler_4k})  ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
 RETRY_TASKS=(${RETRY_TASKS:-humaneval math gsm8k gpqa mmlu sharegpt ruler_4k})  # empty = full run; e.g. RETRY_TASKS="gsm8k math" to re-run only those tasks
 # TP = 1일때 batch 32
-RATES_GSM8K="${RATES_GSM8K:-10 12 14 16}" # 수정
+RATES_GSM8K="${RATES_GSM8K:-10 15 20 25}" # 수정
 RATES_MMLU="${RATES_MMLU:-2 2.5 3 3.5}" 
-RATES_HUMANEVAL="${RATES_HUMANEVAL:-16 20 24 28}" # 수정
-RATES_MATH="${RATES_MATH:-3 3.5 4 4.5}"
-RATES_GPQA="${RATES_GPQA:-1 1.5 2 2.5}"
+RATES_HUMANEVAL="${RATES_HUMANEVAL:-20 25 30 35}" # 수정
+RATES_MATH="${RATES_MATH:-3.5 4 4.5 5}"
+RATES_GPQA="${RATES_GPQA:-1.5 2 2.5 3}"
 RATES_SHAREGPT="${RATES_SHAREGPT:-1.5 2 2.5 3}" # 수정
-RATES_RULER_4K="${RATES_RULER_4K:-3 4 5 6}" # 수정
+RATES_RULER_4K="${RATES_RULER_4K:-3 5 7 9}" # 수정
 RATES_RULER_8K="${RATES_RULER_8K:-0.5 0.75 1 1.25}"
 RATES_RULER_16K="${RATES_RULER_16K:-0.5 0.75 1 1.25}"
 RATES_LONGBENCH_V2="${RATES_LONGBENCH_V2:-1 1.5 2 2.5}"
@@ -374,7 +374,7 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
                 --cuda-graph-max-bs "${MAX_RUNNING_REQUESTS}" \
                 --disable-cuda-graph-padding \
                 --tp-size "${TP_SIZE}" \
-                --mem-fraction-static 0.95 \
+                --mem-fraction-static 0.90 \
                 >> "${RUN_SERVER_LOG}" 2>&1 &
             SERVER_PID=$!
 

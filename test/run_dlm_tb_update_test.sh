@@ -3,7 +3,7 @@ set -euo pipefail
 
 ###### hyper parameter ######
 BLOCK_SIZE="${BLOCK_SIZE:-32}" #32
-MODEL_PATH="${MODEL_PATH:-JetLM/SDAR-8B-Chat}" #JetLM/SDAR-8B-Chat inclusionAI/LLaDA2.0-mini
+MODEL_PATH="${MODEL_PATH:-inclusionAI/LLaDA2.0-mini}" #JetLM/SDAR-8B-Chat inclusionAI/LLaDA2.0-mini
 WARMUP="${WARMUP:-32}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-32}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
@@ -16,13 +16,13 @@ NUM_THREADS_SWEEP=(${NUM_THREADS_SWEEP:-200})
 
 SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/nvme0/kdg6245}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRATCH_ROOT}/dlm_tb_update_test}"
-PORT="${PORT:-30000}"
+PORT="${PORT:-30004}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 THRESHOLD="${THRESHOLD:-0.95}"
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-10.0}"
 RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-20.0}" 
 STRICT_PROB="${STRICT_PROB:-1}"
-FORWARD_TIME_S="${FORWARD_TIME_S:-0.030}"
+FORWARD_TIME_S="${FORWARD_TIME_S:-0.040}"
 PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"
 DECODE_FORWARD_TIME_S="${DECODE_FORWARD_TIME_S:-}"
 CONFIG_PATH="${CONFIG_PATH:-${OUTPUT_ROOT}/dlm_algo_config.yaml}"
@@ -307,18 +307,15 @@ echo "Bellman convergence plots"
 echo "============================================================"
 
 for RATE in "${REQUEST_RATES[@]}"; do
-    for TASK in "${TASKS[@]}"; do
-        OUT_DIR="${OUTPUT_ROOT}/request_rate_${RATE}/${TASK}"
+    RATE_DIR="${OUTPUT_ROOT}/request_rate_${RATE}"
+    echo
+    echo "Bellman convergence: request_rate=${RATE}, tasks=${TASKS[*]}"
+    echo "------------------------------------------------------------"
 
-        echo
-        echo "Bellman convergence: request_rate=${RATE}, task=${TASK}"
-        echo "------------------------------------------------------------"
-
-        python test/plot_bellman_convergence.py \
-            --log-dir "${OUT_DIR}" \
-            --tasks "${TASK}" \
-            --output "${OUT_DIR}/bellman_convergence.png"
-    done
+    python test/plot_bellman_convergence.py \
+        --log-dir "${RATE_DIR}" \
+        --tasks "${TASKS[@]}" \
+        --output "${RATE_DIR}/bellman_convergence_all.png"
 done
 
 echo

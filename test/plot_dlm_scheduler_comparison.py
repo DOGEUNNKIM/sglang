@@ -554,6 +554,11 @@ def plot_scatter_ttfb_tpob(
     has_any_strict = any(s[2] for s in sched_split)
     has_any_release = any(s[4] for s in sched_split)
     single_type = has_any_strict != has_any_release  # all-strict or all-release
+    # When both SLO tiers are present, color by tier (strict=red, release=blue)
+    # instead of by scheduler so the tier split is immediately visible.
+    color_by_tier = has_any_strict and has_any_release
+    _STRICT_COLOR  = "#C44E52"  # matches strict SLO line color
+    _RELEASE_COLOR = "#4472C4"  # matches release SLO line color
 
     # ── Per-scheduler subplots ─────────────────────────────────────────────────
     n = len(sched_split)
@@ -561,20 +566,23 @@ def plot_scatter_ttfb_tpob(
 
     for col, (label, sched_color, sx, sy, rx, ry, ox, oy) in enumerate(sched_split):
         ax = axes[0][col]
+        dot_s = _STRICT_COLOR  if color_by_tier else sched_color
+        dot_r = _RELEASE_COLOR if color_by_tier else sched_color
+        dot_o = sched_color
         if sx:
             s_met_x, s_met_y, s_viol_x, s_viol_y = _split_by_slo(sx, sy, slo_strict)
             if s_met_x:
-                ax.scatter(s_met_x, s_met_y, s=8, alpha=0.6, color=sched_color, label="strict (met)", rasterized=True)
+                ax.scatter(s_met_x, s_met_y, s=8, alpha=0.6, color=dot_s, label="strict (met)", rasterized=True)
             if s_viol_x:
-                ax.scatter(s_viol_x, s_viol_y, s=8, alpha=0.6, color=_lighten_color(sched_color), label="strict (violated)", rasterized=True)
+                ax.scatter(s_viol_x, s_viol_y, s=8, alpha=0.6, color=_lighten_color(dot_s), label="strict (violated)", rasterized=True)
         if rx:
             r_met_x, r_met_y, r_viol_x, r_viol_y = _split_by_slo(rx, ry, slo_relaxed)
             if r_met_x:
-                ax.scatter(r_met_x, r_met_y, s=8, alpha=0.6, color=sched_color, label="release (met)", rasterized=True)
+                ax.scatter(r_met_x, r_met_y, s=8, alpha=0.6, color=dot_r, label="release (met)", rasterized=True)
             if r_viol_x:
-                ax.scatter(r_viol_x, r_viol_y, s=8, alpha=0.6, color=_lighten_color(sched_color), label="release (violated)", rasterized=True)
+                ax.scatter(r_viol_x, r_viol_y, s=8, alpha=0.6, color=_lighten_color(dot_r), label="release (violated)", rasterized=True)
         if ox:
-            ax.scatter(ox, oy, s=8, alpha=0.6, color=sched_color, label="other", rasterized=True)
+            ax.scatter(ox, oy, s=8, alpha=0.6, color=dot_o, label="other", rasterized=True)
         _draw_slo_lines(ax, bool(sx), bool(rx), bool(ox), slo_strict, slo_relaxed)
         ax.set_xlabel("TTFB (ms)", fontsize=10)
         ax.set_title(label, fontsize=11, fontweight="bold")
@@ -595,23 +603,57 @@ def plot_scatter_ttfb_tpob(
     plt.close(fig)
     print(f"[plot] wrote {output}")
 
-    # ── Combined figure (single slo_type only, one dot color per scheduler) ───
-    if not single_type:
+    # ── Combined figure ────────────────────────────────────────────────────────
+    # color_by_tier: dots colored by SLO tier (strict=red, release=blue),
+    #                marker shape distinguishes scheduler.
+    # single_type:   dots colored by scheduler (existing behaviour).
+    if not single_type and not color_by_tier:
         return
 
-    slo_for_combined = slo_strict if has_any_strict else slo_relaxed
-    fig2, ax2 = plt.subplots(figsize=(6.0, 5.0))
-    for label, sched_color, sx, sy, rx, ry, ox, oy in sched_split:
-        xs = sx if sx else (rx if rx else ox)
-        ys = sy if sy else (ry if ry else oy)
-        if not xs:
-            continue
-        met_x, met_y, viol_x, viol_y = _split_by_slo(xs, ys, slo_for_combined)
-        if met_x:
-            ax2.scatter(met_x, met_y, s=5, alpha=0.6, color=sched_color, label=label, rasterized=True)
-        if viol_x:
-            ax2.scatter(viol_x, viol_y, s=5, alpha=0.6, color=_lighten_color(sched_color), label=f"{label} (violated)", rasterized=True)
     has_any_other = any(s[6] for s in sched_split)
+    fig2, ax2 = plt.subplots(figsize=(6.0, 5.0))
+
+    if color_by_tier:
+        _MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*"]
+        for i, (label, sched_color, sx, sy, rx, ry, ox, oy) in enumerate(sched_split):
+            mkr = _MARKERS[i % len(_MARKERS)]
+            if sx:
+                s_met_x, s_met_y, s_viol_x, s_viol_y = _split_by_slo(sx, sy, slo_strict)
+                if s_met_x:
+                    ax2.scatter(s_met_x, s_met_y, s=10, alpha=0.6, color=_STRICT_COLOR,
+                                marker=mkr, label=f"{label} strict (met)", rasterized=True)
+                if s_viol_x:
+                    ax2.scatter(s_viol_x, s_viol_y, s=10, alpha=0.6,
+                                color=_lighten_color(_STRICT_COLOR), marker=mkr,
+                                label=f"{label} strict (viol)", rasterized=True)
+            if rx:
+                r_met_x, r_met_y, r_viol_x, r_viol_y = _split_by_slo(rx, ry, slo_relaxed)
+                if r_met_x:
+                    ax2.scatter(r_met_x, r_met_y, s=10, alpha=0.6, color=_RELEASE_COLOR,
+                                marker=mkr, label=f"{label} release (met)", rasterized=True)
+                if r_viol_x:
+                    ax2.scatter(r_viol_x, r_viol_y, s=10, alpha=0.6,
+                                color=_lighten_color(_RELEASE_COLOR), marker=mkr,
+                                label=f"{label} release (viol)", rasterized=True)
+            if ox:
+                ax2.scatter(ox, oy, s=10, alpha=0.6, color=sched_color,
+                            marker=mkr, label=label, rasterized=True)
+        slo_label = "strict+release"
+    else:
+        slo_for_combined = slo_strict if has_any_strict else slo_relaxed
+        for label, sched_color, sx, sy, rx, ry, ox, oy in sched_split:
+            xs = sx if sx else (rx if rx else ox)
+            ys = sy if sy else (ry if ry else oy)
+            if not xs:
+                continue
+            met_x, met_y, viol_x, viol_y = _split_by_slo(xs, ys, slo_for_combined)
+            if met_x:
+                ax2.scatter(met_x, met_y, s=5, alpha=0.6, color=sched_color, label=label, rasterized=True)
+            if viol_x:
+                ax2.scatter(viol_x, viol_y, s=5, alpha=0.6, color=_lighten_color(sched_color),
+                            label=f"{label} (violated)", rasterized=True)
+        slo_label = "strict" if has_any_strict else "relaxed"
+
     _draw_slo_lines(ax2, has_any_strict, has_any_release, has_any_other, slo_strict, slo_relaxed)
     ax2.set_xlabel("TTFB (ms)", fontsize=11)
     ax2.set_ylabel("TPOB (ms)", fontsize=11)
@@ -619,7 +661,6 @@ def plot_scatter_ttfb_tpob(
     ax2.grid(True, color="#dddddd", linewidth=0.8, alpha=0.85)
     ax2.set_axisbelow(True)
     ax2.tick_params(axis="both", labelsize=9)
-    slo_label = "strict" if has_any_strict else "relaxed"
     ax2.set_title(
         title or f"TTFB vs TPOB all schedulers ({slo_label}) — {task.upper()} @ {rate} req/s",
         fontsize=11, fontweight="bold",
@@ -902,14 +943,26 @@ def main() -> None:
             dpi=args.dpi,
         )
     if not args.no_bar:
+        bar_slo_ttfb = args.bar_slo_ttfb_ms
+        bar_slo_tpob = args.bar_slo_tpob_ms
+        if (bar_slo_ttfb is None or bar_slo_tpob is None) and args.bar_task:
+            cfg_path = args.slo_config or (args.output.parent / "slo_config.json")
+            if cfg_path.exists():
+                import json as _json
+                task_slo = _json.loads(cfg_path.read_text()).get(args.bar_task, {})
+                strict = task_slo.get("strict", {})
+                if bar_slo_ttfb is None:
+                    bar_slo_ttfb = strict.get("ttfb_ms")
+                if bar_slo_tpob is None:
+                    bar_slo_tpob = strict.get("tpob_ms")
         plot_bar_p99(
             summary=summary,
             output=args.bar_output or default_bar_output(args.output),
             task=args.bar_task,
             rate=args.bar_rate,
             schedulers=schedulers,
-            slo_ttfb_ms=args.bar_slo_ttfb_ms,
-            slo_tpob_ms=args.bar_slo_tpob_ms,
+            slo_ttfb_ms=bar_slo_ttfb,
+            slo_tpob_ms=bar_slo_tpob,
             title=args.title,
             dpi=args.dpi,
         )

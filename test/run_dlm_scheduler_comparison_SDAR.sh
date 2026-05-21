@@ -6,15 +6,15 @@ BLOCK_SIZE="${BLOCK_SIZE:-32}"
 
 ################################
 TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu sharegpt ruler_4k}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
-RETRY_TASKS=(${RETRY_TASKS:-humaneval math gsm8k gpqa mmlu sharegpt ruler_4k})  # empty = full run; e.g. RETRY_TASKS="gsm8k math" to re-run only those tasks
+RETRY_TASKS=(${RETRY_TASKS:-humaneval math gpqa mmlu sharegpt ruler_4k})  # empty = full run; e.g. RETRY_TASKS="gsm8k math" to re-run only those tasks
 # TP = 1 batch = 32 block_size = 32 일때
-RATES_GSM8K="${RATES_GSM8K:-3 4 5 6}" 
+RATES_GSM8K="${RATES_GSM8K:-3 5 7 9}" # 수정
 RATES_MMLU="${RATES_MMLU:-1.2 1.4 1.6 1.8}" 
-RATES_HUMANEVAL="${RATES_HUMANEVAL:-8 12 16 20}" # 수정
-RATES_MATH="${RATES_MATH:-1 1.2 1.4 1.6}" 
-RATES_GPQA="${RATES_GPQA:-0.6 0.8 1.0 1.2}"
-RATES_SHAREGPT="${RATES_SHAREGPT:-2 3 4 5}" # 수정
-RATES_RULER_4K="${RATES_RULER_4K:-4 5 6 7}" # 수정
+RATES_HUMANEVAL="${RATES_HUMANEVAL:-10 15 20 25}" # 수정
+RATES_MATH="${RATES_MATH:-1 1.25 1.5 2}"  # 수정
+RATES_GPQA="${RATES_GPQA:-0.8 1.0 1.2 1.4}" # 수정
+RATES_SHAREGPT="${RATES_SHAREGPT:-2 3 4 5}" 
+RATES_RULER_4K="${RATES_RULER_4K:-3 5 7 9}" # 수정
 # TP = 2일때
 #RATES_GSM8K="${RATES_GSM8K:-4 4.5 5 5.5}" # 결정
 #RATES_MMLU="${RATES_MMLU:-1 1.2 1.4 1.6}" # 결정
@@ -62,7 +62,7 @@ NUM_THREADS="${NUM_THREADS:-}"
 DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-}"
 PORT="${PORT:-30001}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
-THRESHOLD="${THRESHOLD:-0.95}"
+THRESHOLD="${THRESHOLD:-0.90}"
 PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"
 DECODE_FORWARD_TIME_S="${DECODE_FORWARD_TIME_S:-}"
 CONFIG_PATH="${CONFIG_PATH:-${OUTPUT_ROOT}/dlm_algo_config_sched_cmp_SDAR.yaml}"
