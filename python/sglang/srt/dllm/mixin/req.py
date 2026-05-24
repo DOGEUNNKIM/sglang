@@ -50,6 +50,16 @@ class ReqDllmMixin:
         self.dllm_block_ready_time: Optional[float] = None
         self.dllm_decode_delay_sum: float = 0.0
         self.dllm_decode_delay_count: int = 0
+        # TPOB-phase decode wait: block-ready → first batch plus active
+        # decode end→next-start gaps, averaged over completed TPOB intervals.
+        self.dllm_current_block_decode_wait: float = 0.0
+        self.dllm_decode_wait_sum: float = 0.0
+        self.dllm_decode_wait_count: int = 0
+        self.dllm_decode_wait_list: list[float] = []
+        self.dllm_last_decode_batch_end_time: Optional[float] = None
+        self.dllm_decode_inter_batch_gap_sum: float = 0.0
+        self.dllm_decode_inter_batch_gap_count: int = 0
+        self.dllm_decode_inter_batch_gap_max: float = 0.0
         # prefill→first_unmask gap: time from last prefill forward → first unmask batch
         self.dllm_prefill_end_time: Optional[float] = None
         self.dllm_first_unmask_gap: Optional[float] = None
@@ -229,6 +239,50 @@ class ReqDllmMixin:
             return None
         return self.dllm_decode_delay_sum / self.dllm_decode_delay_count
 
+    def record_dllm_block_start_delay(self: Req, delay: float) -> None:
+        """Record block-ready → first decode batch delay for one TPOB interval."""
+        delay = max(0.0, delay)
+        self.dllm_decode_delay_sum += delay
+        self.dllm_decode_delay_count += 1
+        self.dllm_current_block_decode_wait += delay
+
+    def record_dllm_decode_batch_start(self: Req, ts: float) -> None:
+        """Record active-block wait between consecutive decode batches."""
+        if self.dllm_last_decode_batch_end_time is None:
+            return
+        gap = max(0.0, ts - self.dllm_last_decode_batch_end_time)
+        self.dllm_current_block_decode_wait += gap
+        self.dllm_decode_inter_batch_gap_sum += gap
+        self.dllm_decode_inter_batch_gap_count += 1
+        self.dllm_decode_inter_batch_gap_max = max(
+            self.dllm_decode_inter_batch_gap_max, gap
+        )
+
+    def mark_dllm_decode_batch_end(self: Req, ts: float) -> None:
+        self.dllm_last_decode_batch_end_time = ts
+
+    def record_dllm_completed_block_decode_wait(self: Req) -> None:
+        """Finalize decode wait for a completed block that has a previous block."""
+        wait = max(0.0, self.dllm_current_block_decode_wait)
+        self.dllm_decode_wait_sum += wait
+        self.dllm_decode_wait_count += 1
+        self.dllm_decode_wait_list.append(wait)
+
+    def get_dllm_decode_wait(self: Req) -> Optional[float]:
+        """Mean per-TPOB interval decode wait, including active decode gaps."""
+        if self.dllm_decode_wait_count == 0:
+            return None
+        return self.dllm_decode_wait_sum / self.dllm_decode_wait_count
+
+    def get_dllm_decode_inter_batch_gap(self: Req) -> Optional[float]:
+        """Mean active decode batch end→next-start gap."""
+        if self.dllm_decode_inter_batch_gap_count == 0:
+            return None
+        return (
+            self.dllm_decode_inter_batch_gap_sum
+            / self.dllm_decode_inter_batch_gap_count
+        )
+
     def is_dllm_prefill(self: Req) -> bool:
         return self.dllm_phase in [
             DllmReqPhase.STAGING_PREFILL,
@@ -250,6 +304,8 @@ class ReqDllmMixin:
         self.dllm_pending_kv_save = False
         self.dllm_active_remaining_masks = None
         self.dllm_block_mask_trajectory = []
+        self.dllm_current_block_decode_wait = 0.0
+        self.dllm_last_decode_batch_end_time = None
 
     def determine_dllm_phase(self: Req):
         if self.has_dllm_active_block():

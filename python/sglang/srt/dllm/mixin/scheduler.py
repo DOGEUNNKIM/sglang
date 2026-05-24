@@ -209,10 +209,10 @@ class SchedulerDllmMixin:
         block_emit_time = time.perf_counter()
         has_output = False
         has_finished = False
+        req_modes_in_batch = getattr(batch, "dllm_req_modes", []) or []
 
         if next_token_ids_list or updated_ids or pending_kv_save or kv_saved:
             self.token_to_kv_pool_allocator.free_group_begin()
-            req_modes_in_batch = getattr(batch, "dllm_req_modes", []) or []
 
             for idx in range(batch.batch_size()):
                 req = batch.reqs[idx]
@@ -248,6 +248,8 @@ class SchedulerDllmMixin:
 
                 req.fill_ids[-new_tokens:] = next_token_ids[:]
                 self.num_generated_tokens += new_tokens
+                if req.dllm_last_block_time is not None:
+                    req.record_dllm_completed_block_decode_wait()
                 req.record_dllm_block_emit_time(block_emit_time)
 
                 req.output_ids.extend(next_token_ids)
@@ -306,6 +308,14 @@ class SchedulerDllmMixin:
                 self.dllm_manager.queue_dirty = True
             self.token_to_kv_pool_allocator.free_group_end()
 
+        for idx, req in enumerate(batch.reqs):
+            if (
+                idx < len(req_modes_in_batch)
+                and req_modes_in_batch[idx] in ("unmask", "kv_save")
+                and req.has_dllm_active_block()
+            ):
+                req.mark_dllm_decode_batch_end(block_emit_time)
+
         can_run_cuda_graph = getattr(result, "can_run_cuda_graph", False)
         self._maybe_log_dllm_batch_metrics(batch, result)
         self.report_prefill_stats(
@@ -355,6 +365,8 @@ class SchedulerDllmMixin:
         tpob = req.get_dllm_tpob()
         mean_tpob = req.get_dllm_mean_tpob()
         decode_delay = req.get_dllm_decode_delay()
+        decode_wait = req.get_dllm_decode_wait()
+        decode_inter_batch_gap = req.get_dllm_decode_inter_batch_gap()
         first_unmask_gap = req.dllm_first_unmask_gap
         sched_wait_s = req.time_stats.get_queueing_time() if req.time_stats else None
         record = {
@@ -387,6 +399,31 @@ class SchedulerDllmMixin:
             "decode_delay_ms": None if decode_delay is None else decode_delay * 1000,
             "mean_decode_delay_s": decode_delay,
             "mean_decode_delay_ms": None if decode_delay is None else decode_delay * 1000,
+            # Per-TPOB interval decode wait: block-ready → first decode batch
+            # plus active-block decode batch end→next-start gaps.
+            "decode_wait_s": decode_wait,
+            "decode_wait_ms": None if decode_wait is None else decode_wait * 1000,
+            "mean_decode_wait_s": decode_wait,
+            "mean_decode_wait_ms": None if decode_wait is None else decode_wait * 1000,
+            "decode_wait_count": req.dllm_decode_wait_count,
+            "decode_wait_list_ms": [v * 1000 for v in req.dllm_decode_wait_list],
+            # Active-block gaps only, useful for diagnosing mid-block starvation.
+            "decode_inter_batch_gap_s": decode_inter_batch_gap,
+            "decode_inter_batch_gap_ms": (
+                None
+                if decode_inter_batch_gap is None
+                else decode_inter_batch_gap * 1000
+            ),
+            "mean_decode_inter_batch_gap_s": decode_inter_batch_gap,
+            "mean_decode_inter_batch_gap_ms": (
+                None
+                if decode_inter_batch_gap is None
+                else decode_inter_batch_gap * 1000
+            ),
+            "max_decode_inter_batch_gap_s": req.dllm_decode_inter_batch_gap_max,
+            "max_decode_inter_batch_gap_ms": (
+                req.dllm_decode_inter_batch_gap_max * 1000
+            ),
             # prefill completion → first unmask batch assigned
             "first_unmask_gap_s": first_unmask_gap,
             "first_unmask_gap_ms": None if first_unmask_gap is None else first_unmask_gap * 1000,
@@ -494,13 +531,12 @@ class SchedulerDllmMixin:
             req_modes.append(req_mode)
 
             if req_mode in ("unmask", "kv_save"):
+                now = getattr(batch, "dllm_forward_start_time", time.perf_counter())
                 if req.dllm_active_ids is None:
-                    now = time.perf_counter()
                     # inter-block decode delay (block 2+)
                     if req.dllm_block_ready_time is not None:
                         delay = now - req.dllm_block_ready_time
-                        req.dllm_decode_delay_sum += delay
-                        req.dllm_decode_delay_count += 1
+                        req.record_dllm_block_start_delay(delay)
                         req.dllm_block_ready_time = None
                     # prefill → first unmask gap (first block only)
                     if req.dllm_prefill_end_time is not None and req.dllm_first_unmask_gap is None:
@@ -514,6 +550,7 @@ class SchedulerDllmMixin:
                     req.dllm_active_remaining_masks = _remaining
                     req.dllm_block_mask_trajectory = [_remaining]
                 else:
+                    req.record_dllm_decode_batch_start(now)
                     _remaining = chunk.count(mask_id)
                     req.dllm_block_mask_trajectory.append(_remaining)
                     req.dllm_active_remaining_masks = _remaining

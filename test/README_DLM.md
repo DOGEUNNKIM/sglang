@@ -100,9 +100,32 @@ plot_bellman_convergence.py
 ./test/run_dlm_scheduler_comparison_SDAR.sh
 ```
 
+### Execution Modes
+
+The scripts support three execution modes controlled by `RETRY_TASKS`:
+
+| Mode | Condition | Behavior |
+|------|-----------|----------|
+| **Retry (partial)** | `RETRY_TASKS` is a strict subset of `TASKS` | Deletes and re-runs only the specified tasks across all schedulers; summary covers only `RETRY_TASKS` |
+| **Full rerun** | `RETRY_TASKS` equals `TASKS` (same set) | Deletes all `scheduler_*` directories and re-runs everything |
+| **Plot-only** | `RETRY_TASKS` is empty (`RETRY_TASKS=""`) | Skips all benchmarks; reads existing `slo_config.json` and `slo_rates.json` as-is; only regenerates `slo_summary.json` |
+
+```bash
+# Retry only math and gsm8k across all schedulers
+RETRY_TASKS="math gsm8k" ./test/run_dlm_scheduler_comparison_LLADA2.sh
+
+# Full rerun (same as default when RETRY_TASKS == TASKS)
+./test/run_dlm_scheduler_comparison_LLADA2.sh
+
+# Plot-only: regenerate slo_summary.json from existing files without running any benchmark
+RETRY_TASKS="" ./test/run_dlm_scheduler_comparison_LLADA2.sh
+```
+
+`SUMMARY_TASKS` controls which tasks appear in the final `slo_summary.json`. It defaults to `RETRY_TASKS` in retry/full-rerun mode and to all `TASKS` in plot-only mode. It can also be set explicitly.
+
 ### Key Parameters
 
-The two scripts differ only in model-specific defaults.
+The two scripts share the same structure and differ only in model-specific defaults.
 
 | Variable | LLADA2 default | SDAR default | Description |
 |----------|---------------|-------------|-------------|
@@ -110,48 +133,89 @@ The two scripts differ only in model-specific defaults.
 | `FORWARD_TIME_S` | `0.04` | `0.08` | Expected time per forward pass (s) |
 | `OUTPUT_ROOT` | `.../dlm_sched_comparison_LLADA2` | `.../dlm_sched_comparison_SDAR` | Root directory for all outputs |
 | `BLOCK_SIZE` | `32` | `32` | Output block size (tokens) |
-| `TASKS` | `humaneval math gsm8k gpqa mmlu sharegpt ruler_4k` | same | Tasks to benchmark |
-| `RATES_<TASK>` | 4 values per task (e.g. humaneval `10 12 14 16`) | 4 values per task (e.g. humaneval `8 10 12 14`) | Request rate sweep values per task |
-| `NUM_EXAMPLES_<TASK>` | `200` | `200` | Number of requests per task |
-| `SCHEDULERS` | `TTFB DECODE LST SOLA FCFS PREFILL` | same | Schedulers to compare |
+| `TASKS` | `math mmlu gsm8k sharegpt ruler_4k gpqa humaneval` | `humaneval sharegpt math mmlu gsm8k gpqa ruler_4k` | Full task list |
+| `RETRY_TASKS` | same as `TASKS` | same as `TASKS` | Tasks to re-run (empty = plot-only, equals TASKS = full rerun) |
+| `SUMMARY_TASKS` | (auto) | (auto) | Tasks included in the summary; defaults to `RETRY_TASKS` if set, else `TASKS` |
+| `RATES_GSM8K` | `8 9 10 11` | `3 3.5 4 4.5` | Request rate sweep for gsm8k (req/s) |
+| `RATES_MMLU` | `2 2.2 2.4 2.6` | `1 1.2 1.4 1.6` | Request rate sweep for mmlu (req/s) |
+| `RATES_MATH` | `2.6 2.8 3 3.2` | `1 1.1 1.2 1.3` | Request rate sweep for math (req/s) |
+| `RATES_SHAREGPT` | `1.5 1.7 1.9 2.1` | `1.6 1.8 2.0 2.2` | Request rate sweep for sharegpt (req/s) |
+| `RATES_RULER_4K` | `2 3 4 5` | `2 2.5 3 3.5` | Request rate sweep for ruler_4k (req/s) |
+| `RATES_HUMANEVAL` | `20 25 30 35` | `10 20 30 40` | Request rate sweep for humaneval (req/s) |
+| `RATES_GPQA` | `1.5 2 2.5 3` | `0.8 1.2 1.6 2` | Request rate sweep for gpqa (req/s) |
+| `NUM_EXAMPLES_GSM8K/MATH/MMLU/SHAREGPT` | `1000` | `1000` | Number of requests for large tasks |
+| `NUM_EXAMPLES_RULER_4K` | `400` | `400` | Number of requests for ruler_4k |
+| `NUM_EXAMPLES_HUMANEVAL/GPQA` | `200` | `200` | Number of requests for small tasks |
+| `SCHEDULERS` | `TTFB DECODE FCFS PREFILL SOLA LST` | same | Schedulers to compare |
 | `STRICT_MULTIPLIER` | `10.0` | `10.0` | strict SLO = multiplier × ideal latency |
 | `RELEASE_MULTIPLIER` | `20.0` | `20.0` | release SLO = multiplier × ideal latency |
 | `MAX_RUNNING_REQUESTS` | `32` | `32` | Max concurrent requests on the server |
 | `WARMUP` | `32` | `32` | Number of warmup requests |
 | `TP_SIZE` | `1` | `1` | Tensor parallelism size |
+| `THRESHOLD` | `0.95` | `0.95` | Low-confidence masking threshold |
+| `PORT` | `30002` | `30001` | Server port |
 
 ### Internal Flow
 
+#### Retry / Full-rerun mode (`RETRY_TASKS` non-empty)
+
 ```text
-Delete previous OUTPUT_ROOT
-  LLADA2 default OUTPUT_ROOT = /mnt/nvme0/kdg6245/dlm_sched_comparison_LLADA2
-  SDAR   default OUTPUT_ROOT = /mnt/nvme0/kdg6245/dlm_sched_comparison_SDAR
+Cleanup:
+  touch .retry_run_started          (RUN_MARKER — used to check log freshness)
+  rm slo_summary.json slo_config.json server_log.txt
+  if RETRY_TASKS == TASKS:
+    rm -rf scheduler_*/             (full wipe)
+  else:
+    rm -rf scheduler_*/request_rate_*/<task>/ for each task in RETRY_TASKS
 
 for scheduler in SCHEDULERS:
-  for task in TASKS:
+  for task in RETRY_TASKS:
     for rate in per-task request rates:
       1. Create OUT_DIR for this run
-      2. Write dlm_algo_config.yaml for this run
+      2. Write dllm_algo_config.yaml
+           scheduler_mode: ttfb | fcfs | lst | sola | prefill
+           admission_window: MAX_RUNNING_REQUESTS (DECODE only) | dataset size (others)
+           strict/release SLO thresholds (from calibration, if available)
       3. Launch sglang.launch_server
       4. Run dlm_benchmark.py
       5. Stop server
 
   if scheduler == TTFB:
-    Extract ideal TTFB from the highest-rate result for each task
+    Read p50_ideal_ttfb_ms from scheduler_TTFB/.../highest_rate/<task>_<model>.json
+    Store in IDEAL_TTFB_MS[task]  (used to compute SLO thresholds for later schedulers)
 
   if scheduler == DECODE:
-    Extract ideal TPOB from the highest-rate result for each task
+    Read p50_ideal_tpob_ms from scheduler_DECODE/.../highest_rate/<task>_<model>.json
+    Store in IDEAL_TPOB_MS[task]
 
-After all schedulers finish:
-  1. Build slo_config.json from the extracted ideal TTFB/TPOB values
-  2. Run dlm_slorate.py for each run -> slo_rates.json
-  3. Aggregate all results into slo_summary.json
+Validate (exit 1 if any log is missing or older than RUN_MARKER):
+  for each (scheduler, task, rate) in SCHEDULERS × SUMMARY_TASKS × rates:
+    check dlm_request_latency_<task>.jsonl exists and is newer than RUN_MARKER
+
+Build slo_config.json from IDEAL_TTFB_MS / IDEAL_TPOB_MS × STRICT/RELEASE_MULTIPLIER
+
+Run dlm_slorate.py for each (scheduler, task, rate) in SCHEDULERS × SUMMARY_TASKS × rates
+  -> writes slo_rates.json per run
+
+Aggregate into slo_summary.json
+```
+
+#### Plot-only mode (`RETRY_TASKS` empty)
+
+```text
+No cleanup, no benchmark runs.
+
+Check slo_config.json exists (exit 1 if missing)
+Check all slo_rates.json exist for SCHEDULERS × SUMMARY_TASKS × rates (exit 1 if any missing)
+
+Aggregate existing slo_rates.json into slo_summary.json  (only this file is rewritten)
 ```
 
 ### Output Structure
 
 ```text
 OUTPUT_ROOT/
+  .retry_run_started        (RUN_MARKER — touched at start of each retry run)
   server_log.txt
   slo_config.json
   slo_summary.json
@@ -164,9 +228,6 @@ OUTPUT_ROOT/
 
         humaneval_<model_tag>.json
         summary_<model_tag>.json
-        request_latency_humaneval.jsonl
-        batch_latency_humaneval.jsonl
-        steps_humaneval.jsonl
         dlm_step_stats_humaneval.jsonl
         dlm_request_latency_humaneval.jsonl
         dlm_batch_latency_humaneval.jsonl
@@ -179,10 +240,11 @@ Key files:
 | File | Description |
 |------|-------------|
 | `<task>_<model_tag>.json` | Run summary: accuracy, throughput, p99 TTFB/TPOB, ideal latency |
-| `request_latency_<task>.jsonl` | Request-level latency records; read by `dlm_slorate.py` and scatter plots |
-| `dlm_*_<task>.jsonl` | Raw DLM logs written directly by the server |
+| `dlm_request_latency_<task>.jsonl` | Per-request latency records; read by `dlm_slorate.py` and scatter plots |
+| `dlm_step_stats_<task>.jsonl` | Per-batch-step DLM logs written directly by the server |
+| `dlm_batch_latency_<task>.jsonl` | Per-batch latency logs written directly by the server |
 | `slo_rates.json` | Strict/relaxed SLO attainment rates for this scheduler/task/rate |
-| `slo_config.json` | Per-task strict/relaxed SLO thresholds |
+| `slo_config.json` | Per-task strict/relaxed SLO thresholds derived from TTFB/DECODE calibration |
 | `slo_summary.json` | All scheduler/task/rate results aggregated; input to the plot script |
 
 ## 2. Plot Scheduler Comparison Script

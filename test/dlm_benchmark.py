@@ -998,10 +998,12 @@ def _ideal_tpob_values(records: List[Dict[str, Any]]) -> List[float]:
     values = []
     for record in records:
         tpob = record.get("mean_tpob_ms")
-        decode_delay = record.get("mean_decode_delay_ms")
-        if tpob is None or decode_delay is None:
+        decode_wait = record.get("mean_decode_wait_ms")
+        if decode_wait is None:
+            decode_wait = record.get("mean_decode_delay_ms")
+        if tpob is None or decode_wait is None:
             continue
-        values.append(float(tpob) - float(decode_delay))
+        values.append(float(tpob) - float(decode_wait))
     return values
 
 
@@ -1109,6 +1111,10 @@ def print_latency_summary(task: str, summary: Dict[str, Any]) -> None:
                 ("sched_wait p95", "p95_sched_wait_ms"),
                 ("decode_delay mean", "mean_decode_delay_ms"),
                 ("decode_delay p95", "p95_decode_delay_ms"),
+                ("decode_wait mean", "mean_decode_wait_ms"),
+                ("decode_wait p95", "p95_decode_wait_ms"),
+                ("decode_inter_gap mean", "mean_decode_inter_batch_gap_ms"),
+                ("decode_inter_gap p95", "p95_decode_inter_batch_gap_ms"),
                 ("first_unmask_gap mean", "mean_first_unmask_gap_ms"),
                 ("first_unmask_gap p95", "p95_first_unmask_gap_ms"),
             ],
@@ -1211,6 +1217,11 @@ def summarize_latency_metrics(
     tpob_ms = _values(request_records, "mean_tpob_ms")
     sched_wait_ms = _values(request_records, "sched_wait_ms")
     decode_delay_ms = _values(request_records, "decode_delay_ms")
+    decode_wait_ms = _values(request_records, "decode_wait_ms")
+    decode_inter_batch_gap_ms = _values(request_records, "decode_inter_batch_gap_ms")
+    max_decode_inter_batch_gap_ms = _values(
+        request_records, "max_decode_inter_batch_gap_ms"
+    )
     first_unmask_gap_ms = _values(request_records, "first_unmask_gap_ms")
     ideal_ttfb_ms = _ideal_ttfb_values(request_records)
     ideal_tpob_ms = _ideal_tpob_values(request_records)
@@ -1274,6 +1285,32 @@ def summarize_latency_metrics(
         "p50_decode_delay_ms": _percentile(decode_delay_ms, 50),
         "p95_decode_delay_ms": _percentile(decode_delay_ms, 95),
         "p99_decode_delay_ms": _percentile(decode_delay_ms, 99),
+        "mean_decode_wait_ms": float(np.mean(decode_wait_ms)) if decode_wait_ms else None,
+        "p50_decode_wait_ms": _percentile(decode_wait_ms, 50),
+        "p95_decode_wait_ms": _percentile(decode_wait_ms, 95),
+        "p99_decode_wait_ms": _percentile(decode_wait_ms, 99),
+        "mean_decode_inter_batch_gap_ms": (
+            float(np.mean(decode_inter_batch_gap_ms))
+            if decode_inter_batch_gap_ms
+            else None
+        ),
+        "p50_decode_inter_batch_gap_ms": _percentile(
+            decode_inter_batch_gap_ms, 50
+        ),
+        "p95_decode_inter_batch_gap_ms": _percentile(
+            decode_inter_batch_gap_ms, 95
+        ),
+        "p99_decode_inter_batch_gap_ms": _percentile(
+            decode_inter_batch_gap_ms, 99
+        ),
+        "mean_max_decode_inter_batch_gap_ms": (
+            float(np.mean(max_decode_inter_batch_gap_ms))
+            if max_decode_inter_batch_gap_ms
+            else None
+        ),
+        "p95_max_decode_inter_batch_gap_ms": _percentile(
+            max_decode_inter_batch_gap_ms, 95
+        ),
         "mean_first_unmask_gap_ms": float(np.mean(first_unmask_gap_ms)) if first_unmask_gap_ms else None,
         "p50_first_unmask_gap_ms": _percentile(first_unmask_gap_ms, 50),
         "p95_first_unmask_gap_ms": _percentile(first_unmask_gap_ms, 95),
@@ -1553,7 +1590,7 @@ def plot_scheduling_delays(
     model_name: str,
     output_dir: str,
 ):
-    """Histogram of sched_wait_ms and decode_delay_ms per task."""
+    """Histogram of scheduling and decode wait metrics per task."""
     import matplotlib.pyplot as plt
     import numpy as np
 
@@ -1565,6 +1602,8 @@ def plot_scheduling_delays(
         ("sched_wait_ms",      "Scheduling wait (ms)",      "Scheduling wait — queue entry → first forward"),
         ("first_unmask_gap_ms", "Prefill→unmask gap (ms)",  "Prefill→first unmask gap — last prefill forward → first unmask batch"),
         ("decode_delay_ms",    "Inter-block delay (ms)",    "Decode delay — block ready → next batch"),
+        ("decode_wait_ms",     "Decode wait (ms)",          "Decode wait — block ready + active decode gaps"),
+        ("decode_inter_batch_gap_ms", "Decode inter-batch gap (ms)", "Active decode gap — batch end → next start"),
     ]
 
     for field, xlabel, suptitle in metrics:

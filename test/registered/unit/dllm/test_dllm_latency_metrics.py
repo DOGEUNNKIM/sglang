@@ -42,6 +42,26 @@ class TestDllmLatencyMetrics(unittest.TestCase):
         self.assertEqual(req.get_dllm_tpob(), 6.0)
         self.assertEqual(req.get_dllm_mean_tpob(), 4.5)
 
+    def test_decode_wait_tracks_tpob_interval_waits(self):
+        req = _Req()
+
+        req.record_dllm_block_emit_time(12.0)
+
+        req.record_dllm_block_start_delay(0.2)
+        req.mark_dllm_decode_batch_end(12.5)
+        req.record_dllm_decode_batch_start(13.0)
+        req.mark_dllm_decode_batch_end(13.4)
+        req.record_dllm_decode_batch_start(14.0)
+        req.record_dllm_completed_block_decode_wait()
+        req.record_dllm_block_emit_time(15.0)
+
+        self.assertAlmostEqual(req.get_dllm_decode_delay(), 0.2)
+        self.assertAlmostEqual(req.get_dllm_decode_inter_batch_gap(), 0.55)
+        self.assertAlmostEqual(req.get_dllm_decode_wait(), 1.3)
+        self.assertEqual(req.dllm_decode_wait_count, 1)
+        self.assertEqual(len(req.dllm_decode_wait_list), 1)
+        self.assertAlmostEqual(req.dllm_decode_wait_list[0], 1.3)
+
 
 if __name__ == "__main__":
     unittest.main()
