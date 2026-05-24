@@ -8,5 +8,5 @@ python ./test/plot_dlm_scheduler_comparison.py \
     --output "${OUTPUT_ROOT}/slo_attainment_comparison.png" \
     --slo-config "${OUTPUT_ROOT}/slo_config.json" \
     --p99-normalize-baseline LST \
-    --bar-task gsm8k \
-    --bar-rate 9.5
+    --bar-task humaneval \
+    --bar-rate 35

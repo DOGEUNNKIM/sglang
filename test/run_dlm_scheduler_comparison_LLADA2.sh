@@ -6,7 +6,7 @@ BLOCK_SIZE="${BLOCK_SIZE:-32}"
 
 ################################
 TASKS=(${TASKS:-math mmlu gsm8k sharegpt ruler_4k gpqa humaneval})  ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
-RETRY_TASKS=(${RETRY_TASKS:-math mmlu gsm8k sharegpt ruler_4k gpqa humaneval})  # empty = full run; e.g. RETRY_TASKS="gsm8k math" to re-run only those tasks
+RETRY_TASKS=(${RETRY_TASKS:-humaneval})  # empty = full run; e.g. RETRY_TASKS="gsm8k math" to re-run only those tasks
 SUMMARY_TASKS=(${SUMMARY_TASKS:-})  # default: RETRY_TASKS in retry mode, otherwise TASKS
 # TP = 1일때 batch 32
 # dataset 1000인 것들만 하는데 12시간
@@ -14,8 +14,8 @@ RATES_GSM8K="${RATES_GSM8K:-8 9 10 11}" #1000 # 200 : 10 15 20 25
 RATES_MMLU="${RATES_MMLU:-2 2.2 2.4 2.6}" #1000 # 200 : 2 2.5 3 3.5
 RATES_MATH="${RATES_MATH:-2.6 2.8 3 3.2}" #1000 #200 : 3.5 4 4.5 5
 RATES_SHAREGPT="${RATES_SHAREGPT:-1.5 1.7 1.9 2.1}" #1000 #200 1.5 2 2.5 3
-RATES_RULER_4K="${RATES_RULER_4K:-2 3 4 5}" #400 #200 3 5 7 9
-RATES_HUMANEVAL="${RATES_HUMANEVAL:-20 25 30 35}" #200
+RATES_RULER_4K="${RATES_RULER_4K:-2.5 3 3.5 4}" #400 #200 3 5 7 9
+RATES_HUMANEVAL="${RATES_HUMANEVAL:-10 20 30 40}" #200 20 25 30 35
 RATES_GPQA="${RATES_GPQA:-1.5 2 2.5 3}" #200
 RATES_RULER_8K="${RATES_RULER_8K:-0.5 0.75 1 1.25}"
 RATES_RULER_16K="${RATES_RULER_16K:-0.5 0.75 1 1.25}"
@@ -442,37 +442,25 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
         done  # RATE
     done  # TASK
 
-    # After TTFB scheduler: extract ideal_ttfb from highest rate (dlm_benchmark internal)
+    # After TTFB scheduler: extract both ideal_ttfb and ideal_tpob from highest rate
     if [[ "${SCHEDULER}" == "TTFB" ]]; then
         echo
-        echo "[ideal] TTFB sched done — extracting p50_ideal_ttfb_ms at highest rate per task"
+        echo "[ideal] TTFB sched done — extracting p50_ideal_ttfb_ms and p50_ideal_tpob_ms at highest rate per task"
         for TASK in "${SUMMARY_TASKS[@]}"; do
             _rates=($(_task_rates "${TASK}"))
             _high_rate="${_rates[-1]}"
             _out="${OUTPUT_ROOT}/scheduler_TTFB/request_rate_${_high_rate}/${TASK}"
-            _val=$(_parse_calib_metric "${_out}" "${TASK}" "p50_ideal_ttfb_ms")
-            if [[ -z "${_val}" ]]; then
+            _val_ttfb=$(_parse_calib_metric "${_out}" "${TASK}" "p50_ideal_ttfb_ms")
+            _val_tpob=$(_parse_calib_metric "${_out}" "${TASK}" "p50_ideal_tpob_ms")
+            if [[ -z "${_val_ttfb}" ]]; then
                 echo "[ideal] WARNING: p50_ideal_ttfb_ms not found for task=${TASK} rate=${_high_rate}" >&2
             fi
-            IDEAL_TTFB_MS["${TASK}"]="${_val:-}"
-            echo "  task=${TASK}  rate=${_high_rate}  ideal_ttfb=${_val:-N/A}ms"
-        done
-    fi
-
-    # After DECODE scheduler: extract ideal_tpob from highest rate (dlm_benchmark internal)
-    if [[ "${SCHEDULER}" == "DECODE" ]]; then
-        echo
-        echo "[ideal] DECODE sched done — extracting p50_ideal_tpob_ms at highest rate per task"
-        for TASK in "${SUMMARY_TASKS[@]}"; do
-            _rates=($(_task_rates "${TASK}"))
-            _high_rate="${_rates[-1]}"
-            _out="${OUTPUT_ROOT}/scheduler_DECODE/request_rate_${_high_rate}/${TASK}"
-            _val=$(_parse_calib_metric "${_out}" "${TASK}" "p50_ideal_tpob_ms")
-            if [[ -z "${_val}" ]]; then
+            if [[ -z "${_val_tpob}" ]]; then
                 echo "[ideal] WARNING: p50_ideal_tpob_ms not found for task=${TASK} rate=${_high_rate}" >&2
             fi
-            IDEAL_TPOB_MS["${TASK}"]="${_val:-}"
-            echo "  task=${TASK}  rate=${_high_rate}  ideal_tpob=${_val:-N/A}ms"
+            IDEAL_TTFB_MS["${TASK}"]="${_val_ttfb:-}"
+            IDEAL_TPOB_MS["${TASK}"]="${_val_tpob:-}"
+            echo "  task=${TASK}  rate=${_high_rate}  ideal_ttfb=${_val_ttfb:-N/A}ms  ideal_tpob=${_val_tpob:-N/A}ms"
         done
     fi
 

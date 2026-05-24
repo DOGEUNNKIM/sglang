@@ -263,14 +263,11 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
 
     # Extract calibration values inline
     if [[ "${SCHEDULER}" == "TTFB" ]]; then
-        _val=$(_parse_calib_metric "${OUT_DIR}" "${TASK}" "p50_ideal_ttfb_ms")
-        IDEAL_TTFB_MS["${TASK}"]="${_val:-}"
-        echo "[ideal] task=${TASK}  ideal_ttfb=${_val:-N/A}ms"
-    fi
-    if [[ "${SCHEDULER}" == "DECODE" ]]; then
-        _val=$(_parse_calib_metric "${OUT_DIR}" "${TASK}" "p50_ideal_tpob_ms")
-        IDEAL_TPOB_MS["${TASK}"]="${_val:-}"
-        echo "[ideal] task=${TASK}  ideal_tpob=${_val:-N/A}ms"
+        _val_ttfb=$(_parse_calib_metric "${OUT_DIR}" "${TASK}" "p50_ideal_ttfb_ms")
+        _val_tpob=$(_parse_calib_metric "${OUT_DIR}" "${TASK}" "p50_ideal_tpob_ms")
+        IDEAL_TTFB_MS["${TASK}"]="${_val_ttfb:-}"
+        IDEAL_TPOB_MS["${TASK}"]="${_val_tpob:-}"
+        echo "[ideal] task=${TASK}  ideal_ttfb=${_val_ttfb:-N/A}ms  ideal_tpob=${_val_tpob:-N/A}ms"
     fi
 
 done  # SCHEDULER

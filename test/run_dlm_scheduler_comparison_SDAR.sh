@@ -75,7 +75,7 @@ NUM_THREADS="${NUM_THREADS:-}"
 DLLM_ADMISSION_WINDOW="${DLLM_ADMISSION_WINDOW:-}"
 PORT="${PORT:-30001}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
-THRESHOLD="${THRESHOLD:-0.90}"
+THRESHOLD="${THRESHOLD:-0.95}"
 PREFILL_FORWARD_TIME_S="${PREFILL_FORWARD_TIME_S:-}"
 DECODE_FORWARD_TIME_S="${DECODE_FORWARD_TIME_S:-}"
 CONFIG_PATH="${CONFIG_PATH:-${OUTPUT_ROOT}/dlm_algo_config_sched_cmp_SDAR.yaml}"
@@ -405,7 +405,7 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
                 --cuda-graph-max-bs "${MAX_RUNNING_REQUESTS}" \
                 --disable-cuda-graph-padding \
                 --tp-size "${TP_SIZE}" \
-                --mem-fraction-static 0.95 \
+                --mem-fraction-static 0.90 \
                 >> "${RUN_SERVER_LOG}" 2>&1 &
             SERVER_PID=$!
 
@@ -437,37 +437,25 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
         done  # RATE
     done  # TASK
 
-    # After TTFB scheduler: extract ideal_ttfb from highest rate (dlm_benchmark internal)
+    # After TTFB scheduler: extract both ideal_ttfb and ideal_tpob from highest rate
     if [[ "${SCHEDULER}" == "TTFB" ]]; then
         echo
-        echo "[ideal] TTFB sched done — extracting p50_ideal_ttfb_ms at highest rate per task"
+        echo "[ideal] TTFB sched done — extracting p50_ideal_ttfb_ms and p50_ideal_tpob_ms at highest rate per task"
         for TASK in "${SUMMARY_TASKS[@]}"; do
             _rates=($(_task_rates "${TASK}"))
             _high_rate="${_rates[-1]}"
             _out="${OUTPUT_ROOT}/scheduler_TTFB/request_rate_${_high_rate}/${TASK}"
-            _val=$(_parse_calib_metric "${_out}" "${TASK}" "p50_ideal_ttfb_ms")
-            if [[ -z "${_val}" ]]; then
+            _val_ttfb=$(_parse_calib_metric "${_out}" "${TASK}" "p50_ideal_ttfb_ms")
+            _val_tpob=$(_parse_calib_metric "${_out}" "${TASK}" "p50_ideal_tpob_ms")
+            if [[ -z "${_val_ttfb}" ]]; then
                 echo "[ideal] WARNING: p50_ideal_ttfb_ms not found for task=${TASK} rate=${_high_rate}" >&2
             fi
-            IDEAL_TTFB_MS["${TASK}"]="${_val:-}"
-            echo "  task=${TASK}  rate=${_high_rate}  ideal_ttfb=${_val:-N/A}ms"
-        done
-    fi
-
-    # After DECODE scheduler: extract ideal_tpob from highest rate (dlm_benchmark internal)
-    if [[ "${SCHEDULER}" == "DECODE" ]]; then
-        echo
-        echo "[ideal] DECODE sched done — extracting p50_ideal_tpob_ms at highest rate per task"
-        for TASK in "${SUMMARY_TASKS[@]}"; do
-            _rates=($(_task_rates "${TASK}"))
-            _high_rate="${_rates[-1]}"
-            _out="${OUTPUT_ROOT}/scheduler_DECODE/request_rate_${_high_rate}/${TASK}"
-            _val=$(_parse_calib_metric "${_out}" "${TASK}" "p50_ideal_tpob_ms")
-            if [[ -z "${_val}" ]]; then
+            if [[ -z "${_val_tpob}" ]]; then
                 echo "[ideal] WARNING: p50_ideal_tpob_ms not found for task=${TASK} rate=${_high_rate}" >&2
             fi
-            IDEAL_TPOB_MS["${TASK}"]="${_val:-}"
-            echo "  task=${TASK}  rate=${_high_rate}  ideal_tpob=${_val:-N/A}ms"
+            IDEAL_TTFB_MS["${TASK}"]="${_val_ttfb:-}"
+            IDEAL_TPOB_MS["${TASK}"]="${_val_tpob:-}"
+            echo "  task=${TASK}  rate=${_high_rate}  ideal_ttfb=${_val_ttfb:-N/A}ms  ideal_tpob=${_val_tpob:-N/A}ms"
         done
     fi
 

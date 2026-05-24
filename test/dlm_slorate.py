@@ -199,7 +199,7 @@ def _count_all(
         if slo_type_filter is not None and record.get("slo_type") != slo_type_filter:
             continue
         ttfb = _metric_value(record, "ttfb_ms")
-        tpob = _metric_value(record, "mean_tpob_ms")
+        tpob = _metric_value(record, "tpob_ms")
         if ttfb is None or tpob is None:
             if missing == "fail":
                 total += 1
@@ -233,10 +233,10 @@ def compute_slo_rates(
         mixed = "strict" in slo_types and "release" in slo_types
         counts = {
             "strict_ttfb": _count_metric(records, "ttfb_ms", task_slo.strict.ttfb_ms, missing, slo_type_filter="strict" if mixed else None),
-            "strict_tpob": _count_metric(records, "mean_tpob_ms", task_slo.strict.tpob_ms, missing, slo_type_filter="strict" if mixed else None),
+            "strict_tpob": _count_metric(records, "tpob_ms", task_slo.strict.tpob_ms, missing, slo_type_filter="strict" if mixed else None),
             "strict_all": _count_all(records, task_slo.strict, missing, slo_type_filter="strict" if mixed else None),
             "relaxed_ttfb": _count_metric(records, "ttfb_ms", task_slo.relaxed.ttfb_ms, missing, slo_type_filter="release" if mixed else None),
-            "relaxed_tpob": _count_metric(records, "mean_tpob_ms", task_slo.relaxed.tpob_ms, missing, slo_type_filter="release" if mixed else None),
+            "relaxed_tpob": _count_metric(records, "tpob_ms", task_slo.relaxed.tpob_ms, missing, slo_type_filter="release" if mixed else None),
             "relaxed_all": _count_all(records, task_slo.relaxed, missing, slo_type_filter="release" if mixed else None),
         }
         for key, (passed, total) in counts.items():
