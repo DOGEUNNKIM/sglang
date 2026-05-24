@@ -5,16 +5,18 @@ MODEL_PATH="${MODEL_PATH:-JetLM/SDAR-8B-Chat}"
 BLOCK_SIZE="${BLOCK_SIZE:-32}"
 
 ################################
-TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu sharegpt ruler_4k}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
-RETRY_TASKS=(${RETRY_TASKS:-humaneval math gpqa mmlu sharegpt ruler_4k})  # empty = full run; e.g. RETRY_TASKS="gsm8k math" to re-run only those tasks
+TASKS=(${TASKS:-humaneval sharegpt math mmlu gsm8k gpqa ruler_4k}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
+RETRY_TASKS=(${RETRY_TASKS:-humaneval sharegpt math mmlu gsm8k gpqa ruler_4k}) 
+SUMMARY_TASKS=(${SUMMARY_TASKS:-})  # default: RETRY_TASKS in retry mode, otherwise TASKS
 # TP = 1 batch = 32 block_size = 32 일때
-RATES_GSM8K="${RATES_GSM8K:-3 5 7 9}" # 수정
-RATES_MMLU="${RATES_MMLU:-1.2 1.4 1.6 1.8}" 
-RATES_HUMANEVAL="${RATES_HUMANEVAL:-10 15 20 25}" # 수정
-RATES_MATH="${RATES_MATH:-1 1.25 1.5 2}"  # 수정
-RATES_GPQA="${RATES_GPQA:-0.8 1.0 1.2 1.4}" # 수정
-RATES_SHAREGPT="${RATES_SHAREGPT:-2 3 4 5}" 
-RATES_RULER_4K="${RATES_RULER_4K:-3 5 7 9}" # 수정
+# dataset 1000인 것들만 하는데 18시간
+RATES_GSM8K="${RATES_GSM8K:-3 3.5 4 4.5}" #1000 # 200 : 3 5 7 9
+RATES_MMLU="${RATES_MMLU:-1 1.2 1.4 1.6}" #1000 # 200 : 1.2 1.4 1.6 1.8
+RATES_MATH="${RATES_MATH:-1 1.1 1.2 1.3}" #1000 # 200 : 1 1.25 1.5 2
+RATES_SHAREGPT="${RATES_SHAREGPT:-1.6 1.8 2.0 2.2}"  #1000 # 200 : 2 3 4 5
+RATES_RULER_4K="${RATES_RULER_4K:-2 2.5 3 3.5}" #400 # 200 : 3 5 7 9
+RATES_HUMANEVAL="${RATES_HUMANEVAL:-10 20 30 40}"
+RATES_GPQA="${RATES_GPQA:-0.8 1.2 1.6 2}" # 0.8 1.0 1.2 1.4 도 이쁘긴함
 # TP = 2일때
 #RATES_GSM8K="${RATES_GSM8K:-4 4.5 5 5.5}" # 결정
 #RATES_MMLU="${RATES_MMLU:-1 1.2 1.4 1.6}" # 결정
@@ -27,17 +29,17 @@ RATES_RULER_8K="${RATES_RULER_8K:-0.5 0.75 1 1.25}"
 RATES_RULER_16K="${RATES_RULER_16K:-0.5 0.75 1 1.25}"
 RATES_LONGBENCH_V2="${RATES_LONGBENCH_V2:-1 1.5 2 2.5}"
 # Per-task example cap (empty = full dataset). Override via env, e.g. NUM_EXAMPLES_MATH=100.
-NUM_EXAMPLES_GSM8K="${NUM_EXAMPLES_GSM8K:-200}"
+NUM_EXAMPLES_GSM8K="${NUM_EXAMPLES_GSM8K:-1000}" #1000
+NUM_EXAMPLES_MATH="${NUM_EXAMPLES_MATH:-1000}" #1000
+NUM_EXAMPLES_MMLU="${NUM_EXAMPLES_MMLU:-1000}" #1000
+NUM_EXAMPLES_SHAREGPT="${NUM_EXAMPLES_SHAREGPT:-1000}" #1000
+NUM_EXAMPLES_RULER_4K="${NUM_EXAMPLES_RULER_4K:-400}" # 400
 NUM_EXAMPLES_HUMANEVAL="${NUM_EXAMPLES_HUMANEVAL:-200}"
-NUM_EXAMPLES_MATH="${NUM_EXAMPLES_MATH:-200}"
 NUM_EXAMPLES_GPQA="${NUM_EXAMPLES_GPQA:-200}"
-NUM_EXAMPLES_MMLU="${NUM_EXAMPLES_MMLU:-200}"
-NUM_EXAMPLES_SHAREGPT="${NUM_EXAMPLES_SHAREGPT:-200}"
-NUM_EXAMPLES_RULER_4K="${NUM_EXAMPLES_RULER_4K:-200}"
 NUM_EXAMPLES_LONGBENCH_V2="${NUM_EXAMPLES_LONGBENCH_V2:-}"
 NUM_EXAMPLES_RULER_8K="${NUM_EXAMPLES_RULER_8K:-200}"
 NUM_EXAMPLES_RULER_16K="${NUM_EXAMPLES_RULER_16K:-200}"
-SCHEDULERS=(${SCHEDULERS:-TTFB DECODE LST SOLA FCFS PREFILL}) # TTFB DECODE LST SOLA FCFS PREFILL
+SCHEDULERS=(${SCHEDULERS:-TTFB DECODE FCFS PREFILL SOLA LST}) # TTFB DECODE LST SOLA FCFS PREFILL
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-10.0}"
 RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-20.0}"
 STRICT_PROB="${STRICT_PROB:-1}"
@@ -52,9 +54,20 @@ FORWARD_TIME_S="${FORWARD_TIME_S:-0.08}"
 SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/nvme0/kdg6245}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRATCH_ROOT}/dlm_sched_comparison_SDAR}"
 
+if [[ "${#SUMMARY_TASKS[@]}" -eq 0 ]]; then
+    if [[ "${#RETRY_TASKS[@]}" -gt 0 ]]; then
+        SUMMARY_TASKS=("${RETRY_TASKS[@]}")
+    else
+        SUMMARY_TASKS=("${TASKS[@]}")
+    fi
+fi
+
 if [[ "${#RETRY_TASKS[@]}" -eq 0 ]]; then
     echo "[plot-only] RETRY_TASKS is empty — skipping all benchmark runs, plot only"
+else
+    echo "[retry] benchmark tasks: ${RETRY_TASKS[*]}"
 fi
+echo "[summary] summary tasks: ${SUMMARY_TASKS[*]}"
 REQUEST_RATES=(${REQUEST_RATES:-})  # fallback when task has no per-task rates
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
 # NUM_THREADS / DLLM_ADMISSION_WINDOW: when unset, auto-detected from full dataset size per task.
@@ -236,6 +249,7 @@ except Exception:
 trap stop_server EXIT
 
 SERVER_LOG="${OUTPUT_ROOT}/server_log.txt"
+RUN_MARKER="${OUTPUT_ROOT}/.retry_run_started"
 mkdir -p "${OUTPUT_ROOT}"
 
 # Kill any stale server already occupying the port (leftover from a prior run).
@@ -271,17 +285,38 @@ _in_retry_tasks() {
     return 1
 }
 
+_same_task_set() {
+    [[ "${#TASKS[@]}" -eq "${#RETRY_TASKS[@]}" ]] || return 1
+    local _tasks_key _retry_key
+    _tasks_key=$(printf '%s\n' "${TASKS[@]}" | sort | tr '\n' ' ')
+    _retry_key=$(printf '%s\n' "${RETRY_TASKS[@]}" | sort | tr '\n' ' ')
+    [[ "${_tasks_key}" == "${_retry_key}" ]]
+}
+
 # Selective cleanup for retry mode
 if [[ "${#RETRY_TASKS[@]}" -gt 0 && -d "${OUTPUT_ROOT}" ]]; then
     echo "[clean] retry mode — removing results for tasks: ${RETRY_TASKS[*]}"
-    for _task in "${RETRY_TASKS[@]}"; do
-        for _dir in "${OUTPUT_ROOT}"/scheduler_*/request_rate_*/"${_task}"; do
-            if [[ -d "${_dir}" ]]; then
-                echo "[clean]   rm -rf ${_dir}"
-                rm -rf "${_dir}"
-            fi
+    touch "${RUN_MARKER}"
+    rm -f "${OUTPUT_ROOT}/slo_summary.json" \
+          "${OUTPUT_ROOT}/slo_config.json" \
+          "${OUTPUT_ROOT}/server_log.txt"
+    if _same_task_set; then
+        echo "[clean] RETRY_TASKS matches TASKS — removing all scheduler results"
+        for _dir in "${OUTPUT_ROOT}"/scheduler_*; do
+            [[ -d "${_dir}" ]] || continue
+            echo "[clean]   rm -rf ${_dir}"
+            rm -rf "${_dir}"
         done
-    done
+    else
+        for _task in "${RETRY_TASKS[@]}"; do
+            for _dir in "${OUTPUT_ROOT}"/scheduler_*/request_rate_*/"${_task}"; do
+                if [[ -d "${_dir}" ]]; then
+                    echo "[clean]   rm -rf ${_dir}"
+                    rm -rf "${_dir}"
+                fi
+            done
+        done
+    fi
 fi
 
 # ── Main comparison ──────────────────────────────────────────────────────────
@@ -406,7 +441,7 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
     if [[ "${SCHEDULER}" == "TTFB" ]]; then
         echo
         echo "[ideal] TTFB sched done — extracting p50_ideal_ttfb_ms at highest rate per task"
-        for TASK in "${TASKS[@]}"; do
+        for TASK in "${SUMMARY_TASKS[@]}"; do
             _rates=($(_task_rates "${TASK}"))
             _high_rate="${_rates[-1]}"
             _out="${OUTPUT_ROOT}/scheduler_TTFB/request_rate_${_high_rate}/${TASK}"
@@ -423,7 +458,7 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
     if [[ "${SCHEDULER}" == "DECODE" ]]; then
         echo
         echo "[ideal] DECODE sched done — extracting p50_ideal_tpob_ms at highest rate per task"
-        for TASK in "${TASKS[@]}"; do
+        for TASK in "${SUMMARY_TASKS[@]}"; do
             _rates=($(_task_rates "${TASK}"))
             _high_rate="${_rates[-1]}"
             _out="${OUTPUT_ROOT}/scheduler_DECODE/request_rate_${_high_rate}/${TASK}"
@@ -438,15 +473,44 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
 
 done  # SCHEDULER
 
+if [[ "${#RETRY_TASKS[@]}" -gt 0 ]]; then
+    _missing_logs=0
+    echo
+    echo "[validate] checking freshly generated latency logs for summary tasks"
+    for SCHEDULER in "${SCHEDULERS[@]}"; do
+        for TASK in "${SUMMARY_TASKS[@]}"; do
+            _rates=($(_task_rates "${TASK}"))
+            for RATE in "${_rates[@]}"; do
+                _latency_log="${OUTPUT_ROOT}/scheduler_${SCHEDULER}/request_rate_${RATE}/${TASK}/dlm_request_latency_${TASK}.jsonl"
+                if [[ ! -s "${_latency_log}" || ! "${_latency_log}" -nt "${RUN_MARKER}" ]]; then
+                    echo "[validate] ERROR: missing or stale latency log: ${_latency_log}" >&2
+                    _missing_logs=1
+                fi
+            done
+        done
+    done
+    if [[ "${_missing_logs}" -ne 0 ]]; then
+        echo "[validate] retry run did not produce all latency logs; refusing to build a mixed summary" >&2
+        exit 1
+    fi
+fi
+
 # ── Write calibrated SLO config for dlm_slorate.py ───────────────────────────
 SLO_CONFIG_PATH="${OUTPUT_ROOT}/slo_config.json"
-python3 -c "
+if [[ "${#RETRY_TASKS[@]}" -eq 0 ]]; then
+    if [[ ! -s "${SLO_CONFIG_PATH}" ]]; then
+        echo "[plot-only] ERROR: missing existing SLO config: ${SLO_CONFIG_PATH}" >&2
+        exit 1
+    fi
+    echo "[plot-only] using existing SLO config: ${SLO_CONFIG_PATH}"
+else
+    python3 -c "
 import json, sys
-tasks = '${TASKS[*]}'.split()
+tasks = '${SUMMARY_TASKS[*]}'.split()
 strict_m  = float('${STRICT_MULTIPLIER}')
 release_m = float('${RELEASE_MULTIPLIER}')
-ideal_ttfb = {$(for T in "${TASKS[@]}"; do echo "'${T}': float('${IDEAL_TTFB_MS[${T}]:-0}'),"; done)}
-ideal_tpob = {$(for T in "${TASKS[@]}"; do echo "'${T}': float('${IDEAL_TPOB_MS[${T}]:-0}'),"; done)}
+ideal_ttfb = {$(for T in "${SUMMARY_TASKS[@]}"; do echo "'${T}': float('${IDEAL_TTFB_MS[${T}]:-0}'),"; done)}
+ideal_tpob = {$(for T in "${SUMMARY_TASKS[@]}"; do echo "'${T}': float('${IDEAL_TPOB_MS[${T}]:-0}'),"; done)}
 slos = {}
 for t in tasks:
     ittfb, itpob = ideal_ttfb.get(t, 0), ideal_tpob.get(t, 0)
@@ -460,31 +524,53 @@ with open('${SLO_CONFIG_PATH}', 'w') as f:
 print('[slo_config] written to ${SLO_CONFIG_PATH}')
 print(json.dumps(slos, indent=2))
 "
+fi
 
 echo
 echo "============================================================"
 echo "DLM Scheduler Comparison — SLO Summary"
 echo "============================================================"
 
-for SCHEDULER in "${SCHEDULERS[@]}"; do
-    for TASK in "${TASKS[@]}"; do
-        _rates=($(_task_rates "${TASK}"))
-        for RATE in "${_rates[@]}"; do
-            OUT_DIR="${OUTPUT_ROOT}/scheduler_${SCHEDULER}/request_rate_${RATE}/${TASK}"
-            SLO_PATH="${OUT_DIR}/slo_rates.json"
-
-            echo
-            echo "scheduler=${SCHEDULER}  task=${TASK}  request_rate=${RATE}"
-            echo "------------------------------------------------------------"
-
-            python test/dlm_slorate.py \
-                --latency-dir "${OUT_DIR}" \
-                --tasks "${TASK}" \
-                --slo-config "${SLO_CONFIG_PATH}" \
-                --output-json "${SLO_PATH}"
+if [[ "${#RETRY_TASKS[@]}" -eq 0 ]]; then
+    _missing_slo_rates=0
+    echo "[plot-only] using existing slo_rates.json files"
+    for SCHEDULER in "${SCHEDULERS[@]}"; do
+        for TASK in "${SUMMARY_TASKS[@]}"; do
+            _rates=($(_task_rates "${TASK}"))
+            for RATE in "${_rates[@]}"; do
+                SLO_PATH="${OUTPUT_ROOT}/scheduler_${SCHEDULER}/request_rate_${RATE}/${TASK}/slo_rates.json"
+                if [[ ! -s "${SLO_PATH}" ]]; then
+                    echo "[plot-only] ERROR: missing existing SLO rates: ${SLO_PATH}" >&2
+                    _missing_slo_rates=1
+                fi
+            done
         done
     done
-done
+    if [[ "${_missing_slo_rates}" -ne 0 ]]; then
+        echo "[plot-only] refusing to continue with incomplete SLO rate inputs" >&2
+        exit 1
+    fi
+else
+    for SCHEDULER in "${SCHEDULERS[@]}"; do
+        for TASK in "${SUMMARY_TASKS[@]}"; do
+            _rates=($(_task_rates "${TASK}"))
+            for RATE in "${_rates[@]}"; do
+                OUT_DIR="${OUTPUT_ROOT}/scheduler_${SCHEDULER}/request_rate_${RATE}/${TASK}"
+                SLO_PATH="${OUT_DIR}/slo_rates.json"
+
+                echo
+                echo "scheduler=${SCHEDULER}  task=${TASK}  request_rate=${RATE}"
+                echo "------------------------------------------------------------"
+
+                python test/dlm_slorate.py \
+                    --latency-dir "${OUT_DIR}" \
+                    --tasks "${TASK}" \
+                    --slo-config "${SLO_CONFIG_PATH}" \
+                    --output-json "${SLO_PATH}"
+            done
+        done
+    done
+fi
 
 # ── Consolidated SLO summary ──────────────────────────────────────────────────
 SUMMARY_PATH="${OUTPUT_ROOT}/slo_summary.json"
@@ -494,7 +580,7 @@ from pathlib import Path
 
 output_root = '${OUTPUT_ROOT}'
 schedulers  = '${SCHEDULERS[*]}'.split()
-tasks       = '${TASKS[*]}'.split()
+tasks       = '${SUMMARY_TASKS[*]}'.split()
 task_rate_map = {
     'gsm8k':        '${RATES_GSM8K}'.split(),
     'humaneval':    '${RATES_HUMANEVAL}'.split(),
