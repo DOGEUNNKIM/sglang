@@ -16,10 +16,14 @@ run_*.sh
 |------|------|
 | `run_dlm_scheduler_comparison_LLADA2.sh` | Scheduler comparison experiment for LLaDA2.0-mini |
 | `run_dlm_scheduler_comparison_SDAR.sh` | Scheduler comparison experiment for SDAR-8B-Chat |
+| `run_dlm_scatter_comparison_LLADA2.sh` | Single-rate scatter experiment for LLaDA2.0-mini |
+| `run_dlm_scatter_comparison_SDAR.sh` | Single-rate scatter experiment for SDAR-8B-Chat |
+| `run_dlm_llm_comparison.sh` | Head-to-head throughput comparison: DLM (LLaDA2.0-mini) vs LLM (Ling-mini-2.0) on humaneval |
 | `plot_dlm_scheduler_comparison_LLADA2.sh` | Re-plot wrapper for LLADA2 results |
 | `plot_dlm_scheduler_comparison_SDAR.sh` | Re-plot wrapper for SDAR results |
 | `run_dlm_task_spec.sh` | Measures per-task input length, output block, and step distributions |
 | `run_dlm_tb_update_test.sh` | Verifies that the Bellman table update converges to the actual step distribution |
+| `LLM_benchmark.py` | Benchmark runner for standard LLM servers (no DLM-specific logging) |
 | `dlm_benchmark.py` | Benchmark runner — sends requests to a running SGLang server and saves per-task results |
 | `dlm_slorate.py` | Computes SLO attainment rates from `request_latency_<task>.jsonl` |
 | `plot_dlm_scheduler_comparison.py` | Generates scheduler comparison plots from `slo_summary.json` |
@@ -39,6 +43,23 @@ run_dlm_scheduler_comparison_SDAR.sh
   -> python -m sglang.launch_server
   -> test/dlm_benchmark.py
   -> test/dlm_slorate.py
+
+run_dlm_scatter_comparison_LLADA2.sh
+  -> python -m sglang.launch_server
+  -> test/dlm_benchmark.py
+  -> test/dlm_slorate.py
+
+run_dlm_scatter_comparison_SDAR.sh
+  -> python -m sglang.launch_server
+  -> test/dlm_benchmark.py
+  -> test/dlm_slorate.py
+
+run_dlm_llm_comparison.sh
+  -> python -m sglang.launch_server  (DLM model, FCFS)
+  -> test/dlm_benchmark.py           (DLM side)
+  -> python -m sglang.launch_server  (LLM model)
+  -> test/LLM_benchmark.py           (LLM side)
+  -> inline summary table
 
 plot_dlm_scheduler_comparison_LLADA2.sh
   -> test/plot_dlm_scheduler_comparison.py
@@ -182,11 +203,9 @@ for scheduler in SCHEDULERS:
 
   if scheduler == TTFB:
     Read p50_ideal_ttfb_ms from scheduler_TTFB/.../highest_rate/<task>_<model>.json
-    Store in IDEAL_TTFB_MS[task]  (used to compute SLO thresholds for later schedulers)
-
-  if scheduler == DECODE:
-    Read p50_ideal_tpob_ms from scheduler_DECODE/.../highest_rate/<task>_<model>.json
-    Store in IDEAL_TPOB_MS[task]
+    Read p50_ideal_tpob_ms from scheduler_TTFB/.../highest_rate/<task>_<model>.json
+    Store in IDEAL_TTFB_MS[task] and IDEAL_TPOB_MS[task]
+    (used to compute SLO thresholds for all subsequent schedulers)
 
 Validate (exit 1 if any log is missing or older than RUN_MARKER):
   for each (scheduler, task, rate) in SCHEDULERS × SUMMARY_TASKS × rates:
@@ -244,7 +263,7 @@ Key files:
 | `dlm_step_stats_<task>.jsonl` | Per-batch-step DLM logs written directly by the server |
 | `dlm_batch_latency_<task>.jsonl` | Per-batch latency logs written directly by the server |
 | `slo_rates.json` | Strict/relaxed SLO attainment rates for this scheduler/task/rate |
-| `slo_config.json` | Per-task strict/relaxed SLO thresholds derived from TTFB/DECODE calibration |
+| `slo_config.json` | Per-task strict/relaxed SLO thresholds derived from TTFB scheduler calibration |
 | `slo_summary.json` | All scheduler/task/rate results aggregated; input to the plot script |
 
 ## 2. Plot Scheduler Comparison Script
@@ -469,3 +488,83 @@ Key files:
 | `step_stats_<task>.jsonl` | Per-batch-step log containing `req_modes` and `block_steps` |
 | `slo_rates.json` | Strict/relaxed SLO attainment rates |
 | `bellman_convergence.png` | Visualization of Bellman table estimates converging to the actual step distribution |
+
+## 5. LLM Comparison Script
+
+Runs a head-to-head throughput and accuracy comparison between the DLM model (LLaDA2.0-mini, FCFS scheduler) and a standard LLM (Ling-mini-2.0) on the humaneval task. Starts a fresh server for each model/rate combination and prints a summary table at the end.
+
+### Run
+
+```bash
+./test/run_dlm_llm_comparison.sh
+```
+
+### Key Parameters
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DLM_MODEL` | `inclusionAI/LLaDA2.0-mini` | DLM model path |
+| `LLM_MODEL` | `inclusionAI/Ling-mini-2.0` | LLM model path |
+| `BLOCK_SIZE` | `32` | Output block size (tokens) |
+| `TP_SIZE` | `4` | Tensor parallelism size |
+| `DLM_MAX_RUNNING_REQUESTS` | `64` | Max concurrent requests for DLM server |
+| `LLM_MAX_RUNNING_REQUESTS` | `164` | Max concurrent requests for LLM server |
+| `WARMUP` | `32` | Number of warmup requests |
+| `DLM_RATES` | `164` | Request rate(s) for DLM sweep (space-separated) |
+| `LLM_RATES` | `164` | Request rate(s) for LLM sweep (space-separated) |
+| `NUM_EXAMPLES` | `164` | Number of requests per run |
+| `DLM_PORT` | `30007` | Server port for DLM model |
+| `LLM_PORT` | `30008` | Server port for LLM model |
+| `OUTPUT_ROOT` | `.../dlm_llm_comparison` | Root directory for all outputs |
+| `FORWARD_TIME_S` | `0.04` | Expected time per DLM forward pass (s) |
+| `THRESHOLD` | `0.95` | Low-confidence masking threshold |
+
+### Internal Flow
+
+```text
+Delete and recreate OUTPUT_ROOT
+Kill any stale processes on DLM_PORT and LLM_PORT
+
+Phase 1 — DLM benchmark (FCFS scheduler, humaneval)
+  for RATE in DLM_RATES:
+    1. Write dlm_config.yaml (scheduler_mode=fcfs)
+    2. Launch sglang.launch_server with --dllm-algorithm LowConfidence
+    3. Run dlm_benchmark.py --tasks humaneval
+    4. Stop server
+
+Phase 2 — LLM benchmark (standard SGLang server, humaneval)
+  for RATE in LLM_RATES:
+    1. Launch sglang.launch_server (no DLM algorithm)
+    2. Run LLM_benchmark.py --tasks humaneval
+    3. Stop server
+
+Phase 3 — Summary table (stdout)
+  Read <task>_<model_tag>.json for each run
+  Print: Model | Rate | Throughput (tok/s) | pass@1 | Latency
+```
+
+### Output Structure
+
+```text
+OUTPUT_ROOT/
+  dlm/
+    rate_<R>/
+      dlm_config.yaml
+      server.log
+      humaneval_<dlm_model_tag>.json
+      step_stats.jsonl
+      request_latency.jsonl
+      batch_latency.jsonl
+
+  llm/
+    rate_<R>/
+      server.log
+      humaneval_<llm_model_tag>.json
+```
+
+Key files:
+
+| File | Description |
+|------|-------------|
+| `humaneval_<model_tag>.json` | Run summary: accuracy (pass@1 / score), throughput, latency |
+| `request_latency.jsonl` | Per-request latency records (DLM side only) |
