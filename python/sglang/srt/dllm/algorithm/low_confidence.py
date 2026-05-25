@@ -91,6 +91,7 @@ class LowConfidence(DllmAlgorithm):
             if torch.sum(mask_index).item() == 0:
                 break
 
+            pre_forward_mask_index = mask_index.clone()
             _step_t0 = time.perf_counter()
             out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
             _step_ms = (time.perf_counter() - _step_t0) * 1000
@@ -135,7 +136,13 @@ class LowConfidence(DllmAlgorithm):
                 block_input_ids[transfer_index] = x[transfer_index]
 
             if self.batch_log_file is not None:
-                self._log_inner_forward(batch_size, _step_ms, forward_batch, step)
+                self._log_inner_forward(
+                    batch_size,
+                    _step_ms,
+                    forward_batch,
+                    step,
+                    pre_forward_mask_index,
+                )
 
         _final_t0 = time.perf_counter()
         out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
@@ -144,7 +151,13 @@ class LowConfidence(DllmAlgorithm):
         logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
 
         if self.batch_log_file is not None:
-            self._log_inner_forward(batch_size, _final_ms, forward_batch, unmask_steps)
+            self._log_inner_forward(
+                batch_size,
+                _final_ms,
+                forward_batch,
+                unmask_steps,
+                count_all_reqs=True,
+            )
 
         if self.step_log_file is not None:
             with open(self.step_log_file, "a") as f:
@@ -181,19 +194,41 @@ class LowConfidence(DllmAlgorithm):
         forward_ms: float,
         forward_batch: ForwardBatch,
         step: int,
+        mask_index_for_budget: torch.Tensor = None,
+        count_all_reqs: bool = False,
     ) -> None:
-        mask_index = forward_batch.input_ids == self.mask_id
-        per_req_extend = [self.block_size] * batch_size
-        num_masked_reqs = sum(
-            1
+        if mask_index_for_budget is None:
+            mask_index_for_budget = forward_batch.input_ids == self.mask_id
+
+        per_req_has_mask = [
+            bool(
+                mask_index_for_budget[
+                    b * self.block_size : (b + 1) * self.block_size
+                ].any()
+            )
             for b in range(batch_size)
-            if mask_index[b * self.block_size : (b + 1) * self.block_size].any()
-        )
+        ]
+        if count_all_reqs:
+            per_req_extend = [self.block_size] * batch_size
+            effective_per_req_extend = per_req_extend
+        else:
+            # The baseline algorithm forwards the whole fixed batch on every
+            # inner step.  For ETB, count only blocks that still needed unmask
+            # compute before this forward; completed blocks are intra-batch
+            # bubbles.
+            per_req_extend = [
+                self.block_size if has_mask else 0 for has_mask in per_req_has_mask
+            ]
+            effective_per_req_extend = per_req_extend
+        num_masked_reqs = sum(1 for has_mask in per_req_has_mask if has_mask)
         record = {
             "seq": self._inner_seq,
             "phase": "decode",
             "decode_inner_step": step,
             "per_req_extend_input_len": per_req_extend,
+            "physical_per_req_extend_input_len": [self.block_size] * batch_size,
+            "effective_per_req_extend_input_len": effective_per_req_extend,
+            "per_req_has_mask": per_req_has_mask,
             "num_reqs": batch_size,
             "num_masked_reqs": num_masked_reqs,
             "forward_result_ms": forward_ms,
