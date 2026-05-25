@@ -1,4 +1,5 @@
 import json
+import time
 from typing import List, Tuple, Union
 
 import numpy as np
@@ -22,6 +23,9 @@ class LowConfidence(DllmAlgorithm):
         self.threshold = config.algorithm_config.get("threshold", 0.95)
         # When set, append per-block step counts (JSONL) to this file for analysis.
         self.step_log_file = config.algorithm_config.get("step_log_file", None)
+        # When set, append one record per individual GPU forward during decode.
+        self.batch_log_file = config.algorithm_config.get("batch_latency_log_file", None)
+        self._inner_seq = 0
 
     def run(
         self,
@@ -87,7 +91,9 @@ class LowConfidence(DllmAlgorithm):
             if torch.sum(mask_index).item() == 0:
                 break
 
+            _step_t0 = time.perf_counter()
             out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
+            _step_ms = (time.perf_counter() - _step_t0) * 1000
             raw_forward_calls += 1
             unmask_steps += 1
             logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
@@ -128,9 +134,17 @@ class LowConfidence(DllmAlgorithm):
 
                 block_input_ids[transfer_index] = x[transfer_index]
 
+            if self.batch_log_file is not None:
+                self._log_inner_forward(batch_size, _step_ms, forward_batch, step)
+
+        _final_t0 = time.perf_counter()
         out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
+        _final_ms = (time.perf_counter() - _final_t0) * 1000
         raw_forward_calls += 1
         logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
+
+        if self.batch_log_file is not None:
+            self._log_inner_forward(batch_size, _final_ms, forward_batch, unmask_steps)
 
         if self.step_log_file is not None:
             with open(self.step_log_file, "a") as f:
@@ -159,6 +173,35 @@ class LowConfidence(DllmAlgorithm):
             raw_forward_calls,
             block_steps,
         )
+
+
+    def _log_inner_forward(
+        self,
+        batch_size: int,
+        forward_ms: float,
+        forward_batch: ForwardBatch,
+        step: int,
+    ) -> None:
+        mask_index = forward_batch.input_ids == self.mask_id
+        per_req_extend = [self.block_size] * batch_size
+        num_masked_reqs = sum(
+            1
+            for b in range(batch_size)
+            if mask_index[b * self.block_size : (b + 1) * self.block_size].any()
+        )
+        record = {
+            "seq": self._inner_seq,
+            "phase": "decode",
+            "decode_inner_step": step,
+            "per_req_extend_input_len": per_req_extend,
+            "num_reqs": batch_size,
+            "num_masked_reqs": num_masked_reqs,
+            "forward_result_ms": forward_ms,
+            "duration_ms": forward_ms,
+        }
+        with open(self.batch_log_file, "a") as f:
+            f.write(json.dumps(record) + "\n")
+        self._inner_seq += 1
 
 
 Algorithm = LowConfidence

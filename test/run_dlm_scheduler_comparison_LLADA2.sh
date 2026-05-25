@@ -3,15 +3,20 @@ set -euo pipefail
 
 MODEL_PATH="${MODEL_PATH:-inclusionAI/LLaDA2.0-mini}"
 BLOCK_SIZE="${BLOCK_SIZE:-32}"
+STRICT_PROB="${STRICT_PROB:-1}"
+MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-32}"
+WARMUP="${WARMUP:-32}"
+TP_SIZE="${TP_SIZE:-1}"
+FORWARD_TIME_S="${FORWARD_TIME_S:-0.030}"
 
 ################################
-TASKS=(${TASKS:-ruler_1_4k})  ##### TASK humaneval math gsm8k gpqa mmlu ruler_1k ruler_2k ruler_3k ruler_4k ruler_8k ruler_16k sharegpt
-RATES_GSM8K="${RATES_GSM8K:-200}"
-RATES_MMLU="${RATES_MMLU:-200}"
+TASKS=(${TASKS:-math gsm8k mmlu sharegpt})  ##### TASK humaneval math gsm8k gpqa mmlu sharegpt ruler_1k ruler_2k ruler_3k ruler_4k ruler_1_4k
+RATES_GSM8K="${RATES_GSM8K:-1000}" #200
+RATES_MMLU="${RATES_MMLU:-1000}" #200
 RATES_HUMANEVAL="${RATES_HUMANEVAL:-200}"
-RATES_MATH="${RATES_MATH:-200}"
+RATES_MATH="${RATES_MATH:-1000}" #200
 RATES_GPQA="${RATES_GPQA:-200}"
-RATES_SHAREGPT="${RATES_SHAREGPT:-200}"
+RATES_SHAREGPT="${RATES_SHAREGPT:-1000}" #200
 RATES_RULER_1_4K="${RATES_RULER_1_4K:-200}"
 RATES_RULER_1K="${RATES_RULER_1K:-200}"
 RATES_RULER_2K="${RATES_RULER_2K:-200}"
@@ -20,12 +25,12 @@ RATES_RULER_4K="${RATES_RULER_4K:-200}"
 RATES_RULER_8K="${RATES_RULER_8K:-200}"
 RATES_RULER_16K="${RATES_RULER_16K:-200}"
 RATES_LONGBENCH_V2="${RATES_LONGBENCH_V2:-200}"
-NUM_EXAMPLES_GSM8K="${NUM_EXAMPLES_GSM8K:-200}"
+NUM_EXAMPLES_GSM8K="${NUM_EXAMPLES_GSM8K:-1000}" #200
 NUM_EXAMPLES_HUMANEVAL="${NUM_EXAMPLES_HUMANEVAL:-200}"
-NUM_EXAMPLES_MATH="${NUM_EXAMPLES_MATH:-200}"
+NUM_EXAMPLES_MATH="${NUM_EXAMPLES_MATH:-1000}" #200
 NUM_EXAMPLES_GPQA="${NUM_EXAMPLES_GPQA:-200}"
-NUM_EXAMPLES_MMLU="${NUM_EXAMPLES_MMLU:-200}"
-NUM_EXAMPLES_SHAREGPT="${NUM_EXAMPLES_SHAREGPT:-200}"
+NUM_EXAMPLES_MMLU="${NUM_EXAMPLES_MMLU:-1000}" #200
+NUM_EXAMPLES_SHAREGPT="${NUM_EXAMPLES_SHAREGPT:-1000}" #200
 NUM_EXAMPLES_RULER_1_4K="${NUM_EXAMPLES_RULER_1_4K:-200}"
 NUM_EXAMPLES_RULER_1K="${NUM_EXAMPLES_RULER_1K:-200}"
 NUM_EXAMPLES_RULER_2K="${NUM_EXAMPLES_RULER_2K:-200}"
@@ -37,11 +42,6 @@ NUM_EXAMPLES_RULER_16K="${NUM_EXAMPLES_RULER_16K:-200}"
 SCHEDULERS=(${SCHEDULERS:-FCFS})
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-10.0}"
 RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-20.0}"
-STRICT_PROB="${STRICT_PROB:-1}"
-MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-32}"
-WARMUP="${WARMUP:-32}"
-TP_SIZE="${TP_SIZE:-1}"
-FORWARD_TIME_S="${FORWARD_TIME_S:-0.030}"
 ################################
 
 SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/nvme0/kdg6245}"
@@ -644,6 +644,56 @@ for sched in schedulers:
                 print(f'{sched:<10} {task:<14} {rate:>6} {s:>8} {t:>10}')
             except Exception as e:
                 print(f'{sched:<10} {task:<14} {rate:>6} {\"ERR\":>8} {str(e)[:10]:>10}')
+"
+
+echo
+echo "============================================================"
+echo "Effective Token Budget Summary"
+echo "============================================================"
+python3 -c "
+import json
+from pathlib import Path
+
+output_root = '${OUTPUT_ROOT}'
+schedulers = '${SCHEDULERS[*]}'.split()
+tasks = '${TASKS[*]}'.split()
+model_tag = '${MODEL_PATH}'.replace('/', '_')
+task_rate_map = {
+    'gsm8k':        '${RATES_GSM8K}'.split(),
+    'humaneval':    '${RATES_HUMANEVAL}'.split(),
+    'math':         '${RATES_MATH}'.split(),
+    'gpqa':         '${RATES_GPQA}'.split(),
+    'mmlu':         '${RATES_MMLU}'.split(),
+    'longbench_v2': '${RATES_LONGBENCH_V2}'.split(),
+    'ruler_1_4k':   '${RATES_RULER_1_4K}'.split(),
+    'ruler_1k':     '${RATES_RULER_1K}'.split(),
+    'ruler_2k':     '${RATES_RULER_2K}'.split(),
+    'ruler_3k':     '${RATES_RULER_3K}'.split(),
+    'ruler_4k':     '${RATES_RULER_4K}'.split(),
+    'ruler_8k':     '${RATES_RULER_8K}'.split(),
+    'ruler_16k':    '${RATES_RULER_16K}'.split(),
+    'sharegpt':     '${RATES_SHAREGPT}'.split(),
+}
+
+print(f\"{'Scheduler':<10} {'Task':<14} {'Rate':>6} {'ETB mean':>10} {'ETB p50':>10} {'ETB p95':>10}\")
+print('-' * 64)
+for sched in schedulers:
+    for task in tasks:
+        for rate in task_rate_map.get(task, []):
+            p = Path(output_root) / f'scheduler_{sched}' / f'request_rate_{rate}' / f'{task}_{model_tag}.json'
+            if not p.exists():
+                print(f'{sched:<10} {task:<14} {rate:>6} {\"N/A\":>10} {\"N/A\":>10} {\"N/A\":>10}')
+                continue
+            try:
+                d = json.loads(p.read_text())
+                ls = d.get('latency_stats', {})
+                mean_etb = ls.get('mean_effective_token_budget')
+                p50_etb  = ls.get('p50_effective_token_budget')
+                p95_etb  = ls.get('p95_effective_token_budget')
+                fmt = lambda v: f'{v:.1f}' if v is not None else 'N/A'
+                print(f'{sched:<10} {task:<14} {rate:>6} {fmt(mean_etb):>10} {fmt(p50_etb):>10} {fmt(p95_etb):>10}')
+            except Exception as e:
+                print(f'{sched:<10} {task:<14} {rate:>6} {\"ERR\":>10} {str(e)[:10]:>10}')
 "
 
 echo

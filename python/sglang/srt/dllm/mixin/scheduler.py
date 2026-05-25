@@ -250,6 +250,10 @@ class SchedulerDllmMixin:
         if log_file is None:
             return
 
+        # Decode phase is logged per individual GPU forward inside LowConfidence.run().
+        if getattr(batch, "dllm_batch_phase", None) == "decode":
+            return
+
         end_time = time.perf_counter()
         start_time = getattr(batch, "dllm_forward_start_time", end_time)
         schedule_start_time = getattr(batch, "dllm_schedule_start_time", start_time)

@@ -972,6 +972,11 @@ def summarize_latency_metrics(
     )
     phase_sequence = [record.get("phase") for record in batch_records]
     req_phase_counts = _count_per_req_phases(batch_records)
+    token_budget_per_fwd = [
+        sum(r["per_req_extend_input_len"])
+        for r in batch_records
+        if r.get("per_req_extend_input_len")
+    ]
 
     return {
         "n_request_records": len(request_records),
@@ -984,6 +989,11 @@ def summarize_latency_metrics(
         "p95_tpob_ms": _percentile(tpob_ms, 95),
         "p99_tpob_ms": _percentile(tpob_ms, 99),
         "n_batch_records": len(batch_records),
+        "mean_effective_token_budget": (
+            float(np.mean(token_budget_per_fwd)) if token_budget_per_fwd else None
+        ),
+        "p50_effective_token_budget": _percentile(token_budget_per_fwd, 50),
+        "p95_effective_token_budget": _percentile(token_budget_per_fwd, 95),
         "avg_prefill_req_ms": avg_prefill_req_ms,
         "avg_decode_block_ms": avg_decode_block_ms,
         "avg_initial_prefill_req_ms": avg_initial_prefill_req_ms,
@@ -1420,20 +1430,18 @@ def main():
                       f"median={np.median(block_steps):.1f}  "
                       f"max={max(block_steps)}")
             if args.log:
+                def _fmt(v):
+                    if v is None:
+                        return "N/A"
+                    return f"{v:.2f}" if isinstance(v, float) else str(v)
                 print(
-                    f"[{task}] latency stats: "
-                    f"mean_ttfb_ms={latency_summary.get('mean_ttfb_ms')}  "
-                    f"p95_ttfb_ms={latency_summary.get('p95_ttfb_ms')}  "
-                    f"p99_ttfb_ms={latency_summary.get('p99_ttfb_ms')}  "
-                    f"mean_tpob_ms={latency_summary.get('mean_tpob_ms')}  "
-                    f"p95_tpob_ms={latency_summary.get('p95_tpob_ms')}  "
-                    f"p99_tpob_ms={latency_summary.get('p99_tpob_ms')}  "
-                    f"avg_prefill_req_ms={latency_summary.get('avg_prefill_req_ms')}  "
-                    f"avg_decode_block_ms={latency_summary.get('avg_decode_block_ms')}  "
-                    f"initial_prefill_req_ms={latency_summary.get('avg_initial_prefill_req_ms')}  "
-                    f"staging_prefill_req_ms={latency_summary.get('avg_staging_prefill_req_ms')}  "
-                    f"mixed_batches={latency_summary.get('mixed_mask_batches')}  "
-                    f"phase_switches={latency_summary.get('phase_switches')}"
+                    f"[{task}] latency stats:\n"
+                    f"  TTFB (ms)      mean={_fmt(latency_summary.get('mean_ttfb_ms'))}  p95={_fmt(latency_summary.get('p95_ttfb_ms'))}  p99={_fmt(latency_summary.get('p99_ttfb_ms'))}\n"
+                    f"  TPOB (ms)      mean={_fmt(latency_summary.get('mean_tpob_ms'))}  p95={_fmt(latency_summary.get('p95_tpob_ms'))}  p99={_fmt(latency_summary.get('p99_tpob_ms'))}\n"
+                    f"  Batch (ms)     prefill_req={_fmt(latency_summary.get('avg_prefill_req_ms'))}  decode_block={_fmt(latency_summary.get('avg_decode_block_ms'))}\n"
+                    f"                 initial_prefill={_fmt(latency_summary.get('avg_initial_prefill_req_ms'))}  staging_prefill={_fmt(latency_summary.get('avg_staging_prefill_req_ms'))}\n"
+                    f"  Phase          mixed_batches={latency_summary.get('mixed_mask_batches')}  phase_switches={latency_summary.get('phase_switches')}\n"
+                    f"  Token budget   mean={_fmt(latency_summary.get('mean_effective_token_budget'))}  p50={_fmt(latency_summary.get('p50_effective_token_budget'))}  p95={_fmt(latency_summary.get('p95_effective_token_budget'))}"
                 )
             else:
                 print(f"[{task}] DLM logging disabled; pass --log to collect latency/step stats")
