@@ -1,0 +1,82 @@
+{
+  "source": "manual_bar_chart_from_user",
+  "metric": "throughput",
+  "unit": "tokens_per_second",
+  "hardware": "A100",
+  "baseline_series": "LLaDA2.0-mini (SGLang)",
+  "relative_plot_baseline_series": "Ling-mini-2.0 (SGLang)",
+  "results": [
+    {
+      "gpu_count": 1,
+      "gpu_label": "1",
+      "series": [
+        {
+          "model": "LLaDA2.0-mini",
+          "system": "SGLang",
+          "throughput": 1138.0,
+          "speedup_vs_baseline": 1.0
+        },
+        {
+          "model": "Ling-mini-2.0",
+          "system": "SGLang",
+          "throughput": 2417.0,
+          "speedup_vs_baseline": 2.12
+        },
+        {
+          "model": "LLaDA2.0-mini",
+          "system": "Ours",
+          "throughput": 2801.0,
+          "speedup_vs_baseline": 2.46
+        }
+      ]
+    },
+    {
+      "gpu_count": 2,
+      "gpu_label": "2",
+      "series": [
+        {
+          "model": "LLaDA2.0-mini",
+          "system": "SGLang",
+          "throughput": 1401.0,
+          "speedup_vs_baseline": 1.0
+        },
+        {
+          "model": "Ling-mini-2.0",
+          "system": "SGLang",
+          "throughput": 2432.0,
+          "speedup_vs_baseline": 1.74
+        },
+        {
+          "model": "LLaDA2.0-mini",
+          "system": "Ours",
+          "throughput": 3243.0,
+          "speedup_vs_baseline": 2.31
+        }
+      ]
+    },
+    {
+      "gpu_count": 4,
+      "gpu_label": "4",
+      "series": [
+        {
+          "model": "LLaDA2.0-mini",
+          "system": "SGLang",
+          "throughput": 1803.0,
+          "speedup_vs_baseline": 1.0
+        },
+        {
+          "model": "Ling-mini-2.0",
+          "system": "SGLang",
+          "throughput": 2354.0,
+          "speedup_vs_baseline": 1.31
+        },
+        {
+          "model": "LLaDA2.0-mini",
+          "system": "Ours",
+          "throughput": 3964.0,
+          "speedup_vs_baseline": 2.2
+        }
+      ]
+    }
+  ]
+}

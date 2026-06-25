@@ -55,7 +55,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
 os.environ.setdefault("OPENAI_API_KEY", "EMPTY")
@@ -982,6 +982,89 @@ def _percentile(values: List[float], q: float) -> Optional[float]:
     return float(np.percentile(values, q))
 
 
+def _records_near_percentile(
+    records: List[Dict[str, Any]], field: str, q: float, n: int = 10
+) -> Tuple[List[Dict[str, Any]], Optional[float]]:
+    """Return the n records closest to the q-th percentile of field, and the target value."""
+    usable = [record for record in records if record.get(field) is not None]
+    if not usable:
+        return [], None
+
+    import numpy as np
+
+    target = float(np.percentile([float(record[field]) for record in usable], q))
+    nearest = sorted(usable, key=lambda item: abs(float(item[field]) - target))[:n]
+    return nearest, target
+
+
+def _avg_field(records: List[Dict[str, Any]], key: str) -> float:
+    vals = [float(r[key]) for r in records if r.get(key) is not None]
+    return sum(vals) / len(vals) if vals else 0.0
+
+
+def _float_or_zero(record: Dict[str, Any], key: str) -> float:
+    value = record.get(key)
+    return 0.0 if value is None else float(value)
+
+
+def _selected_p95_decomposition(
+    request_records: List[Dict[str, Any]],
+) -> Dict[str, Optional[float]]:
+    ttfb_records, ttfb_target = _records_near_percentile(request_records, "ttfb_ms", 95)
+    tpob_records, tpob_target = _records_near_percentile(request_records, "mean_tpob_ms", 95)
+
+    result: Dict[str, Optional[float]] = {
+        "p95_ttfb_selected_target_ms": ttfb_target,
+        "p95_ttfb_selected_total_ms": None,
+        "p95_ttfb_selected_forward_ms": None,
+        "p95_ttfb_selected_sched_wait_ms": None,
+        "p95_ttfb_selected_first_unmask_gap_ms": None,
+        "p95_ttfb_selected_first_block_decode_wait_ms": None,
+        "p95_ttfb_selected_other_ms": None,
+        "p95_tpob_selected_target_ms": tpob_target,
+        "p95_tpob_selected_total_ms": None,
+        "p95_tpob_selected_forward_ms": None,
+        "p95_tpob_selected_decode_wait_ms": None,
+        "p95_tpob_selected_other_ms": None,
+    }
+
+    if ttfb_records:
+        total = _avg_field(ttfb_records, "ttfb_ms")
+        sched_wait = _avg_field(ttfb_records, "sched_wait_ms")
+        first_unmask_gap = _avg_field(ttfb_records, "first_unmask_gap_ms")
+        first_block_dw = _avg_field(ttfb_records, "first_block_decode_wait_ms")
+        forward = max(0.0, total - sched_wait - first_unmask_gap - first_block_dw)
+        other = max(0.0, total - forward - sched_wait - first_unmask_gap - first_block_dw)
+        result.update(
+            {
+                "p95_ttfb_selected_total_ms": total,
+                "p95_ttfb_selected_forward_ms": forward,
+                "p95_ttfb_selected_sched_wait_ms": sched_wait,
+                "p95_ttfb_selected_first_unmask_gap_ms": first_unmask_gap,
+                "p95_ttfb_selected_first_block_decode_wait_ms": first_block_dw,
+                "p95_ttfb_selected_other_ms": other,
+            }
+        )
+
+    if tpob_records:
+        total = _avg_field(tpob_records, "mean_tpob_ms")
+        decode_wait = _avg_field(tpob_records, "mean_decode_wait_ms")
+        if decode_wait == 0.0:
+            decode_wait = _avg_field(tpob_records, "mean_decode_delay_ms")
+        forward = max(0.0, total - decode_wait)
+        other = max(0.0, total - forward - decode_wait)
+        result.update(
+            {
+                "p95_tpob_selected_total_ms": total,
+                "p95_tpob_selected_forward_ms": forward,
+                "p95_tpob_selected_decode_wait_ms": decode_wait,
+                "p95_tpob_selected_other_ms": other,
+            }
+        )
+
+    return result
+
+
 def _ideal_ttfb_values(records: List[Dict[str, Any]]) -> List[float]:
     values = []
     for record in records:
@@ -990,7 +1073,8 @@ def _ideal_ttfb_values(records: List[Dict[str, Any]]) -> List[float]:
         first_unmask_gap = record.get("first_unmask_gap_ms")
         if ttfb is None or sched_wait is None or first_unmask_gap is None:
             continue
-        values.append(float(ttfb) - float(sched_wait) - float(first_unmask_gap))
+        first_block_dw = float(record.get("first_block_decode_wait_ms") or 0.0)
+        values.append(float(ttfb) - float(sched_wait) - float(first_unmask_gap) - first_block_dw)
     return values
 
 
@@ -1117,6 +1201,8 @@ def print_latency_summary(task: str, summary: Dict[str, Any]) -> None:
                 ("decode_inter_gap p95", "p95_decode_inter_batch_gap_ms"),
                 ("first_unmask_gap mean", "mean_first_unmask_gap_ms"),
                 ("first_unmask_gap p95", "p95_first_unmask_gap_ms"),
+                ("first_blk_dw mean", "mean_first_block_decode_wait_ms"),
+                ("first_blk_dw p95", "p95_first_block_decode_wait_ms"),
             ],
         ),
         (
@@ -1148,6 +1234,9 @@ def print_latency_summary(task: str, summary: Dict[str, Any]) -> None:
                 ("decode block ms", "avg_decode_block_ms"),
                 ("initial prefill ms", "avg_initial_prefill_req_ms"),
                 ("staging prefill ms", "avg_staging_prefill_req_ms"),
+                ("eff token budget mean", "mean_effective_token_budget"),
+                ("eff token budget p50", "p50_effective_token_budget"),
+                ("eff token budget p95", "p95_effective_token_budget"),
             ],
         ),
         (
@@ -1223,8 +1312,10 @@ def summarize_latency_metrics(
         request_records, "max_decode_inter_batch_gap_ms"
     )
     first_unmask_gap_ms = _values(request_records, "first_unmask_gap_ms")
+    first_block_decode_wait_ms = _values(request_records, "first_block_decode_wait_ms")
     ideal_ttfb_ms = _ideal_ttfb_values(request_records)
     ideal_tpob_ms = _ideal_tpob_values(request_records)
+    selected_p95 = _selected_p95_decomposition(request_records)
     generated_block_counts = _values(request_records, "num_output_blocks")
     prefill_block_counts_by_req = _prefill_block_counts_by_request(batch_records)
     prefill_block_counts = list(prefill_block_counts_by_req.values())
@@ -1274,6 +1365,11 @@ def summarize_latency_metrics(
         schedule_share_of_e2e_pct = total_schedule_ms / (end_to_end_s * 1000.0) * 100.0
     phase_sequence = [record.get("phase") for record in batch_records]
     req_phase_counts = _count_per_req_phases(batch_records)
+    token_budget_per_fwd = [
+        sum(r["per_req_extend_input_len"])
+        for r in batch_records
+        if r.get("per_req_extend_input_len")
+    ]
 
     return {
         "n_request_records": len(request_records),
@@ -1315,6 +1411,10 @@ def summarize_latency_metrics(
         "p50_first_unmask_gap_ms": _percentile(first_unmask_gap_ms, 50),
         "p95_first_unmask_gap_ms": _percentile(first_unmask_gap_ms, 95),
         "p99_first_unmask_gap_ms": _percentile(first_unmask_gap_ms, 99),
+        "mean_first_block_decode_wait_ms": float(np.mean(first_block_decode_wait_ms)) if first_block_decode_wait_ms else None,
+        "p50_first_block_decode_wait_ms": _percentile(first_block_decode_wait_ms, 50),
+        "p95_first_block_decode_wait_ms": _percentile(first_block_decode_wait_ms, 95),
+        "p99_first_block_decode_wait_ms": _percentile(first_block_decode_wait_ms, 99),
         "mean_ttfb_ms": float(np.mean(ttfb_ms)) if ttfb_ms else None,
         "p50_ttfb_ms": _percentile(ttfb_ms, 50),
         "p95_ttfb_ms": _percentile(ttfb_ms, 95),
@@ -1337,6 +1437,7 @@ def summarize_latency_metrics(
         "p50_ideal_tpob_ms": _percentile(ideal_tpob_ms, 50),
         "p95_ideal_tpob_ms": _percentile(ideal_tpob_ms, 95),
         "p99_ideal_tpob_ms": _percentile(ideal_tpob_ms, 99),
+        **selected_p95,
         "n_generated_block_records": len(generated_block_counts),
         "mean_generated_blocks": (
             float(np.mean(generated_block_counts)) if generated_block_counts else None
@@ -1346,6 +1447,11 @@ def summarize_latency_metrics(
             float(np.mean(prefill_block_counts)) if prefill_block_counts else None
         ),
         "n_batch_records": len(batch_records),
+        "mean_effective_token_budget": (
+            float(np.mean(token_budget_per_fwd)) if token_budget_per_fwd else None
+        ),
+        "p50_effective_token_budget": _percentile(token_budget_per_fwd, 50),
+        "p95_effective_token_budget": _percentile(token_budget_per_fwd, 95),
         "avg_prefill_req_ms": avg_prefill_req_ms,
         "avg_decode_block_ms": avg_decode_block_ms,
         "avg_initial_prefill_req_ms": avg_initial_prefill_req_ms,

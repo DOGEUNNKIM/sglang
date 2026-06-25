@@ -19,6 +19,7 @@ run_*.sh
 | `run_dlm_scatter_comparison_LLADA2.sh` | Single-rate scatter experiment for LLaDA2.0-mini |
 | `run_dlm_scatter_comparison_SDAR.sh` | Single-rate scatter experiment for SDAR-8B-Chat |
 | `run_dlm_llm_comparison.sh` | Head-to-head throughput comparison: DLM (LLaDA2.0-mini) vs LLM (Ling-mini-2.0) on humaneval |
+| `run_dlm_batch_block_sweep.sh` | Sweep batch sizes × block sizes (FCFS fixed); measures throughput and effective activation token budget |
 | `plot_dlm_scheduler_comparison_LLADA2.sh` | Re-plot wrapper for LLADA2 results |
 | `plot_dlm_scheduler_comparison_SDAR.sh` | Re-plot wrapper for SDAR results |
 | `run_dlm_task_spec.sh` | Measures per-task input length, output block, and step distributions |
@@ -77,6 +78,11 @@ run_dlm_tb_update_test.sh
   -> test/dlm_benchmark.py
   -> test/dlm_slorate.py
   -> test/plot_bellman_convergence.py
+
+run_dlm_batch_block_sweep.sh
+  -> python -m sglang.launch_server  (one per batch size)
+  -> test/dlm_benchmark.py           (one per block size, server reused)
+  -> inline summary table
 ```
 
 ### Python Files
@@ -568,3 +574,84 @@ Key files:
 |------|-------------|
 | `humaneval_<model_tag>.json` | Run summary: accuracy (pass@1 / score), throughput, latency |
 | `request_latency.jsonl` | Per-request latency records (DLM side only) |
+
+## 6. Batch × Block Sweep Script
+
+Sweeps batch sizes × block sizes with the FCFS scheduler fixed, measuring output throughput and effective activation token budget (mean tokens processed per forward pass) for each combination. Supports both sglang and sglang-baseline via environment variables.
+
+### Run
+
+```bash
+# sglang
+./test/run_dlm_batch_block_sweep.sh
+
+# sglang-baseline (same script, different PYTHONPATH and OUTPUT_ROOT)
+PYTHONPATH=~/sglang-baseline/python/ \
+OUTPUT_ROOT=/mnt/nvme0/kdg6245/dlm_batch_block_sweep_baseline \
+./test/run_dlm_batch_block_sweep.sh
+```
+
+### Key Parameters
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MODEL_PATH` | `inclusionAI/LLaDA2.0-mini` | Model to benchmark |
+| `TASK` | `humaneval` | Benchmark task |
+| `RATE` | `200` | Request rate (req/s) |
+| `NUM_EXAMPLES` | `200` | Number of requests per run |
+| `WARMUP` | `32` | Warmup requests |
+| `BATCH_SIZES` | `16 32 64` | `--max-running-requests` values to sweep (requires server restart) |
+| `BLOCK_SIZES` | `16 32 64` | Output block sizes to sweep (benchmark-side only, no restart) |
+| `TP_SIZE` | `1` | Tensor parallelism size |
+| `FORWARD_TIME_S` | `0.04` | Expected time per forward pass (s) |
+| `THRESHOLD` | `0.95` | Low-confidence masking threshold |
+| `PORT` | `30004` | Server port |
+| `OUTPUT_ROOT` | `.../dlm_batch_block_sweep` | Root directory for all outputs |
+
+### Internal Flow
+
+```text
+Delete and recreate OUTPUT_ROOT
+Kill any stale processes on PORT
+
+for BATCH_SIZE in BATCH_SIZES:
+  1. Write server_config_batch<B>.yaml (fcfs, dllm_admission_window=BATCH_SIZE)
+  2. Launch server with --max-running-requests BATCH_SIZE --cuda-graph-max-bs BATCH_SIZE
+  3. Wait for server health
+
+  for BLOCK_SIZE in BLOCK_SIZES:
+    4. Write dllm_algo_config.yaml with log file paths
+    5. Hot-reload: cp config into server's watched path
+    6. Run dlm_benchmark.py --block-size BLOCK_SIZE
+    7. (No server restart between block sizes)
+
+  8. Stop server, wait for GPU memory release
+
+Print summary table: Batch Size | Block Size | Throughput | Score | ETB mean | ETB p50 | ETB p95
+```
+
+### Output Structure
+
+```text
+OUTPUT_ROOT/
+  server_config_batch<B>.yaml      # server launch config per batch size
+  server_batch<B>.log              # server stdout/stderr per batch size
+
+  batch_<B>/
+    block_<K>/
+      dllm_algo_config.yaml        # run config with log paths
+      step_stats.jsonl             # per-step stats
+      request_latency.jsonl        # per-request latency records
+      batch_latency.jsonl          # per-batch latency records (includes per_req_extend_input_len)
+      <task>_<model_tag>.json      # run summary: throughput, score, latency_stats
+```
+
+Key output fields in `<task>_<model_tag>.json`:
+
+| Field | Description |
+|-------|-------------|
+| `output_throughput_tok_s` | Output tokens per second |
+| `score` | Task accuracy (pass@1 for humaneval) |
+| `latency_stats.mean_effective_token_budget` | Mean tokens processed per forward pass (all phases) |
+| `latency_stats.p50_effective_token_budget` | p50 effective token budget |
+| `latency_stats.p95_effective_token_budget` | p95 effective token budget |

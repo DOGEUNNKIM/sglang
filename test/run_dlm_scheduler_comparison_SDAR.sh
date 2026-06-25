@@ -6,15 +6,15 @@ BLOCK_SIZE="${BLOCK_SIZE:-32}"
 
 ################################
 TASKS=(${TASKS:-humaneval sharegpt math mmlu gsm8k gpqa ruler_4k}) ##### TASK humaneval math gsm8k gpqa mmlu ruler_4k ruler_8k ruler_16k sharegpt
-RETRY_TASKS=(${RETRY_TASKS:-humaneval sharegpt math mmlu gsm8k gpqa ruler_4k}) 
+RETRY_TASKS=(${RETRY_TASKS:-}) 
 SUMMARY_TASKS=(${SUMMARY_TASKS:-})  # default: RETRY_TASKS in retry mode, otherwise TASKS
 # TP = 1 batch = 32 block_size = 32 일때
-# dataset 1000인 것들만 하는데 18시간
-RATES_GSM8K="${RATES_GSM8K:-3 3.5 4 4.5}" #1000 # 200 : 3 5 7 9
-RATES_MMLU="${RATES_MMLU:-1 1.2 1.4 1.6}" #1000 # 200 : 1.2 1.4 1.6 1.8
-RATES_MATH="${RATES_MATH:-1 1.1 1.2 1.3}" #1000 # 200 : 1 1.25 1.5 2
+# 전부 재수행하는데 30시간 정도
+RATES_GSM8K="${RATES_GSM8K:-2.8 3.0 3.2 3.4}" #1000 # 200 : 3 5 7 9
+RATES_MMLU="${RATES_MMLU:-0.8 1 1.2 1.4}" #1000 # 200 : 1.2 1.4 1.6 1.8
+RATES_MATH="${RATES_MATH:-0.9 1 1.1 1.2}" #1000 # 200 : 1 1.25 1.5 2
 RATES_SHAREGPT="${RATES_SHAREGPT:-1.6 1.8 2.0 2.2}"  #1000 # 200 : 2 3 4 5
-RATES_RULER_4K="${RATES_RULER_4K:-2 2.5 3 3.5}" #400 # 200 : 3 5 7 9
+RATES_RULER_4K="${RATES_RULER_4K:-2 2.5 3 3.5}" #130 2 3 4 5
 RATES_HUMANEVAL="${RATES_HUMANEVAL:-10 20 30 40}"
 RATES_GPQA="${RATES_GPQA:-0.8 1.2 1.6 2}" # 0.8 1.0 1.2 1.4 도 이쁘긴함
 # TP = 2일때
@@ -33,13 +33,13 @@ NUM_EXAMPLES_GSM8K="${NUM_EXAMPLES_GSM8K:-1000}" #1000
 NUM_EXAMPLES_MATH="${NUM_EXAMPLES_MATH:-1000}" #1000
 NUM_EXAMPLES_MMLU="${NUM_EXAMPLES_MMLU:-1000}" #1000
 NUM_EXAMPLES_SHAREGPT="${NUM_EXAMPLES_SHAREGPT:-1000}" #1000
-NUM_EXAMPLES_RULER_4K="${NUM_EXAMPLES_RULER_4K:-400}" # 400
+NUM_EXAMPLES_RULER_4K="${NUM_EXAMPLES_RULER_4K:-130}" # 150 for OoM issue
 NUM_EXAMPLES_HUMANEVAL="${NUM_EXAMPLES_HUMANEVAL:-200}"
 NUM_EXAMPLES_GPQA="${NUM_EXAMPLES_GPQA:-200}"
 NUM_EXAMPLES_LONGBENCH_V2="${NUM_EXAMPLES_LONGBENCH_V2:-}"
 NUM_EXAMPLES_RULER_8K="${NUM_EXAMPLES_RULER_8K:-200}"
 NUM_EXAMPLES_RULER_16K="${NUM_EXAMPLES_RULER_16K:-200}"
-SCHEDULERS=(${SCHEDULERS:-TTFB DECODE FCFS PREFILL SOLA LST}) # TTFB DECODE LST SOLA FCFS PREFILL
+SCHEDULERS=(${SCHEDULERS:-TTFB DECODE FCFS PREFILL SOLA LST}) # TTFB DECODE FCFS PREFILL SOLA LST
 STRICT_MULTIPLIER="${STRICT_MULTIPLIER:-10.0}"
 RELEASE_MULTIPLIER="${RELEASE_MULTIPLIER:-20.0}"
 STRICT_PROB="${STRICT_PROB:-1}"
@@ -130,6 +130,7 @@ m = float('${_multiplier}')
 print(f'{float(\"${_ideal_ttfb_ms}\")*m/1000:.4f} {float(\"${_ideal_tpob_ms}\")*m/1000:.4f}')
 "
 }
+
 
 # write_dllm_config STRICT_TTFB STRICT_TPOB RELEASE_TTFB RELEASE_TPOB SCHEDULER_MODE ADMISSION_WINDOW
 write_dllm_config() {
@@ -405,7 +406,7 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
                 --cuda-graph-max-bs "${MAX_RUNNING_REQUESTS}" \
                 --disable-cuda-graph-padding \
                 --tp-size "${TP_SIZE}" \
-                --mem-fraction-static 0.90 \
+                --mem-fraction-static 0.95 \
                 >> "${RUN_SERVER_LOG}" 2>&1 &
             SERVER_PID=$!
 
@@ -437,7 +438,7 @@ for SCHEDULER in "${SCHEDULERS[@]}"; do
         done  # RATE
     done  # TASK
 
-    # After TTFB scheduler: extract both ideal_ttfb and ideal_tpob from highest rate
+    # After TTFB scheduler: extract ideal from TTFB
     if [[ "${SCHEDULER}" == "TTFB" ]]; then
         echo
         echo "[ideal] TTFB sched done — extracting p50_ideal_ttfb_ms and p50_ideal_tpob_ms at highest rate per task"
@@ -483,15 +484,27 @@ if [[ "${#RETRY_TASKS[@]}" -gt 0 ]]; then
     fi
 fi
 
-# ── Write calibrated SLO config for dlm_slorate.py ───────────────────────────
-SLO_CONFIG_PATH="${OUTPUT_ROOT}/slo_config.json"
-if [[ "${#RETRY_TASKS[@]}" -eq 0 ]]; then
-    if [[ ! -s "${SLO_CONFIG_PATH}" ]]; then
-        echo "[plot-only] ERROR: missing existing SLO config: ${SLO_CONFIG_PATH}" >&2
-        exit 1
-    fi
-    echo "[plot-only] using existing SLO config: ${SLO_CONFIG_PATH}"
-else
+_load_ideal_metrics_from_ttfb_summaries() {
+    local _missing=0
+    echo "[ideal] extracting p50_ideal_ttfb_ms and p50_ideal_tpob_ms from TTFB summaries"
+    for TASK in "${SUMMARY_TASKS[@]}"; do
+        _rates=($(_task_rates "${TASK}"))
+        _high_rate="${_rates[-1]}"
+        _out="${OUTPUT_ROOT}/scheduler_TTFB/request_rate_${_high_rate}/${TASK}"
+        _val_ttfb=$(_parse_calib_metric "${_out}" "${TASK}" "p50_ideal_ttfb_ms")
+        _val_tpob=$(_parse_calib_metric "${_out}" "${TASK}" "p50_ideal_tpob_ms")
+        if [[ -z "${_val_ttfb}" || -z "${_val_tpob}" ]]; then
+            echo "[ideal] ERROR: missing ideal metrics for task=${TASK} rate=${_high_rate} under ${_out}" >&2
+            _missing=1
+        fi
+        IDEAL_TTFB_MS["${TASK}"]="${_val_ttfb:-}"
+        IDEAL_TPOB_MS["${TASK}"]="${_val_tpob:-}"
+        echo "  task=${TASK}  rate=${_high_rate}  ideal_ttfb=${_val_ttfb:-N/A}ms  ideal_tpob=${_val_tpob:-N/A}ms"
+    done
+    return "${_missing}"
+}
+
+_write_slo_config() {
     python3 -c "
 import json, sys
 tasks = '${SUMMARY_TASKS[*]}'.split()
@@ -512,7 +525,11 @@ with open('${SLO_CONFIG_PATH}', 'w') as f:
 print('[slo_config] written to ${SLO_CONFIG_PATH}')
 print(json.dumps(slos, indent=2))
 "
-fi
+}
+
+# ── Write calibrated SLO config for dlm_slorate.py ───────────────────────────
+SLO_CONFIG_PATH="${OUTPUT_ROOT}/slo_config.json"
+_write_slo_config
 
 echo
 echo "============================================================"
@@ -520,8 +537,42 @@ echo "DLM Scheduler Comparison — SLO Summary"
 echo "============================================================"
 
 if [[ "${#RETRY_TASKS[@]}" -eq 0 ]]; then
+    _missing_slo_inputs=0
+    echo "[plot-only] rebuilding missing slo_rates.json files from existing latency logs"
+    for SCHEDULER in "${SCHEDULERS[@]}"; do
+        for TASK in "${SUMMARY_TASKS[@]}"; do
+            _rates=($(_task_rates "${TASK}"))
+            for RATE in "${_rates[@]}"; do
+                OUT_DIR="${OUTPUT_ROOT}/scheduler_${SCHEDULER}/request_rate_${RATE}/${TASK}"
+                SLO_PATH="${OUT_DIR}/slo_rates.json"
+                if [[ -s "${SLO_PATH}" ]]; then
+                    continue
+                fi
+                _latency_log="${OUT_DIR}/dlm_request_latency_${TASK}.jsonl"
+                if [[ ! -s "${_latency_log}" ]]; then
+                    echo "[plot-only] ERROR: missing latency log for SLO rates: ${_latency_log}" >&2
+                    _missing_slo_inputs=1
+                    continue
+                fi
+
+                echo
+                echo "[plot-only] scheduler=${SCHEDULER}  task=${TASK}  request_rate=${RATE}"
+                echo "------------------------------------------------------------"
+                python test/dlm_slorate.py \
+                    --latency-dir "${OUT_DIR}" \
+                    --tasks "${TASK}" \
+                    --slo-config "${SLO_CONFIG_PATH}" \
+                    --output-json "${SLO_PATH}"
+            done
+        done
+    done
+    if [[ "${_missing_slo_inputs}" -ne 0 ]]; then
+        echo "[plot-only] refusing to continue with incomplete latency inputs" >&2
+        exit 1
+    fi
+
     _missing_slo_rates=0
-    echo "[plot-only] using existing slo_rates.json files"
+    echo "[plot-only] validating slo_rates.json files"
     for SCHEDULER in "${SCHEDULERS[@]}"; do
         for TASK in "${SUMMARY_TASKS[@]}"; do
             _rates=($(_task_rates "${TASK}"))
@@ -587,18 +638,42 @@ model_tag = '${MODEL_PATH}'.replace('/', '_')
 def _read_bench_metrics(out_dir, task):
     p = Path(out_dir) / f'{task}_{model_tag}.json'
     if not p.exists():
-        return None, None, None, None
+        return (None,) * 28
     try:
         d = json.loads(p.read_text())
         ls = d.get('latency_stats', d)
         return (
             d.get('score'),
             d.get('score:std'),
+            ls.get('p95_ttfb_ms'),
+            ls.get('p95_tpob_ms'),
             ls.get('p99_ttfb_ms'),
             ls.get('p99_tpob_ms'),
+            ls.get('mean_ttfb_ms'),
+            ls.get('mean_tpob_ms'),
+            ls.get('mean_sched_wait_ms'),
+            ls.get('mean_first_unmask_gap_ms'),
+            ls.get('mean_decode_wait_ms'),
+            ls.get('p95_ideal_ttfb_ms'),
+            ls.get('p95_ideal_tpob_ms'),
+            ls.get('p95_sched_wait_ms'),
+            ls.get('p95_first_unmask_gap_ms'),
+            ls.get('p95_decode_wait_ms'),
+            ls.get('p95_ttfb_selected_target_ms'),
+            ls.get('p95_ttfb_selected_total_ms'),
+            ls.get('p95_ttfb_selected_forward_ms'),
+            ls.get('p95_ttfb_selected_sched_wait_ms'),
+            ls.get('p95_ttfb_selected_first_unmask_gap_ms'),
+            ls.get('p95_ttfb_selected_first_block_decode_wait_ms'),
+            ls.get('p95_ttfb_selected_other_ms'),
+            ls.get('p95_tpob_selected_target_ms'),
+            ls.get('p95_tpob_selected_total_ms'),
+            ls.get('p95_tpob_selected_forward_ms'),
+            ls.get('p95_tpob_selected_decode_wait_ms'),
+            ls.get('p95_tpob_selected_other_ms'),
         )
     except Exception:
-        return None, None, None, None
+        return (None,) * 28
 
 summary = {}
 for sched in schedulers:
@@ -615,18 +690,49 @@ for sched in schedulers:
             if task not in data:
                 continue
             rates_d = data[task].get('rates', {})
-            score, score_std, p99_ttfb, p99_tpob = _read_bench_metrics(out_dir, task)
+            score, score_std, p95_ttfb, p95_tpob, p99_ttfb, p99_tpob, \
+                mean_ttfb, mean_tpob, mean_sched_wait, mean_first_unmask_gap, mean_decode_wait, \
+                p95_ideal_ttfb, p95_ideal_tpob, p95_sched_wait, p95_first_unmask_gap, p95_decode_wait, \
+                p95_ttfb_selected_target, p95_ttfb_selected_total, p95_ttfb_selected_forward, \
+                p95_ttfb_selected_sched_wait, p95_ttfb_selected_first_unmask_gap, p95_ttfb_selected_first_block_dw, p95_ttfb_selected_other, \
+                p95_tpob_selected_target, p95_tpob_selected_total, p95_tpob_selected_forward, \
+                p95_tpob_selected_decode_wait, p95_tpob_selected_other = \
+                _read_bench_metrics(out_dir, task)
             summary[sched][rate][task] = {
-                'score':        score,
-                'score_std':    score_std,
-                'strict_ttfb':  rates_d.get('strict_ttfb'),
-                'strict_tpob':  rates_d.get('strict_tpob'),
-                'strict_all':   rates_d.get('strict_all'),
-                'relaxed_ttfb': rates_d.get('relaxed_ttfb'),
-                'relaxed_tpob': rates_d.get('relaxed_tpob'),
-                'relaxed_all':  rates_d.get('relaxed_all'),
-                'p99_ttfb_ms':  p99_ttfb,
-                'p99_tpob_ms':  p99_tpob,
+                'score':                  score,
+                'score_std':              score_std,
+                'strict_ttfb':            rates_d.get('strict_ttfb'),
+                'strict_tpob':            rates_d.get('strict_tpob'),
+                'strict_all':             rates_d.get('strict_all'),
+                'relaxed_ttfb':           rates_d.get('relaxed_ttfb'),
+                'relaxed_tpob':           rates_d.get('relaxed_tpob'),
+                'relaxed_all':            rates_d.get('relaxed_all'),
+                'p95_ttfb_ms':            p95_ttfb,
+                'p95_tpob_ms':            p95_tpob,
+                'p99_ttfb_ms':            p99_ttfb,
+                'p99_tpob_ms':            p99_tpob,
+                'mean_ttfb_ms':           mean_ttfb,
+                'mean_tpob_ms':           mean_tpob,
+                'mean_sched_wait_ms':     mean_sched_wait,
+                'mean_first_unmask_gap_ms': mean_first_unmask_gap,
+                'mean_decode_wait_ms':    mean_decode_wait,
+                'p95_ideal_ttfb_ms':      p95_ideal_ttfb,
+                'p95_ideal_tpob_ms':      p95_ideal_tpob,
+                'p95_sched_wait_ms':      p95_sched_wait,
+                'p95_first_unmask_gap_ms': p95_first_unmask_gap,
+                'p95_decode_wait_ms':     p95_decode_wait,
+                'p95_ttfb_selected_target_ms': p95_ttfb_selected_target,
+                'p95_ttfb_selected_total_ms': p95_ttfb_selected_total,
+                'p95_ttfb_selected_forward_ms': p95_ttfb_selected_forward,
+                'p95_ttfb_selected_sched_wait_ms': p95_ttfb_selected_sched_wait,
+                'p95_ttfb_selected_first_unmask_gap_ms': p95_ttfb_selected_first_unmask_gap,
+                'p95_ttfb_selected_first_block_decode_wait_ms': p95_ttfb_selected_first_block_dw,
+                'p95_ttfb_selected_other_ms': p95_ttfb_selected_other,
+                'p95_tpob_selected_target_ms': p95_tpob_selected_target,
+                'p95_tpob_selected_total_ms': p95_tpob_selected_total,
+                'p95_tpob_selected_forward_ms': p95_tpob_selected_forward,
+                'p95_tpob_selected_decode_wait_ms': p95_tpob_selected_decode_wait,
+                'p95_tpob_selected_other_ms': p95_tpob_selected_other,
             }
 
 Path('${SUMMARY_PATH}').write_text(json.dumps(summary, indent=2))

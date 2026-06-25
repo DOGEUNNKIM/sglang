@@ -248,7 +248,13 @@ class SchedulerDllmMixin:
 
                 req.fill_ids[-new_tokens:] = next_token_ids[:]
                 self.num_generated_tokens += new_tokens
-                if req.dllm_last_block_time is not None:
+                if req.dllm_last_block_time is None:
+                    # First block: save its accumulated inter-unmask gaps separately
+                    # so they are not lost when clear_dllm_active_block() resets the counter.
+                    req.dllm_first_block_decode_wait = max(
+                        0.0, req.dllm_current_block_decode_wait
+                    )
+                else:
                     req.record_dllm_completed_block_decode_wait()
                 req.record_dllm_block_emit_time(block_emit_time)
 
@@ -274,19 +280,19 @@ class SchedulerDllmMixin:
                     for i, r in enumerate(traj):
                         cfg.update_decode_forwards_estimate(r, float(n_traj - i))
                     cfg.bellman_block_count += 1
-                    if cfg.bellman_log_file:
-                        with open(cfg.bellman_log_file, "a") as _bf:
-                            _bf.write(
-                                json.dumps(
-                                    {
-                                        "block": cfg.bellman_block_count,
-                                        "time": time.perf_counter(),
-                                        "table": list(cfg.decode_forwards_by_remaining),
-                                        "traj": traj,
-                                    }
-                                )
-                                + "\n"
+                    if cfg._bellman_log_fh is not None:
+                        cfg._bellman_log_fh.write(
+                            json.dumps(
+                                {
+                                    "block": cfg.bellman_block_count,
+                                    "time": time.perf_counter(),
+                                    "table": list(cfg.decode_forwards_by_remaining),
+                                    "traj": traj,
+                                }
                             )
+                            + "\n"
+                        )
+                        cfg._bellman_log_fh.flush()
 
                 req.clear_dllm_active_block()
                 has_output = True
@@ -427,6 +433,12 @@ class SchedulerDllmMixin:
             # prefill completion → first unmask batch assigned
             "first_unmask_gap_s": first_unmask_gap,
             "first_unmask_gap_ms": None if first_unmask_gap is None else first_unmask_gap * 1000,
+            # inter-unmask-step gaps accumulated within the first block
+            "first_block_decode_wait_s": req.dllm_first_block_decode_wait,
+            "first_block_decode_wait_ms": (
+                None if req.dllm_first_block_decode_wait is None
+                else req.dllm_first_block_decode_wait * 1000
+            ),
             # time from entering waiting_queue to first forward pass
             "sched_wait_s": sched_wait_s,
             "sched_wait_ms": None if sched_wait_s is None else sched_wait_s * 1000,
@@ -1128,8 +1140,17 @@ class SchedulerDllmMixin:
                 continue
 
             if req.dllm_phase == DllmReqPhase.STAGING_DECODE:
-                # Always schedule: mid-block active state or kv_save-completed decode.
-                # Delaying would waste already-committed KV memory.
+                # LST: STAGING_DECODE competes for capacity like any other request.
+                # Mid-block skips waste one step's KV compute but allow higher-priority
+                # requests (by slack) to take the slot instead.
+                if self.dllm_config.use_lst():
+                    if queuing_capacity_exhausted:
+                        continue
+                    if len(adder.can_run_list) >= self.get_num_allocatable_reqs(running_bs):
+                        self.running_batch.batch_is_full = True
+                        queuing_capacity_exhausted = True
+                        continue
+                # non-LST: always schedule (mid-block KV memory must not be wasted).
                 req.dllm_scheduled_source_phase = req.dllm_phase
                 self._restore_dllm_active_prefix_indices(req)
                 res = adder.add_dllm_staging_req(req)
@@ -1141,7 +1162,7 @@ class SchedulerDllmMixin:
                 # STAGING_PREFILL, QUEUING_PREFILL, QUEUING_DECODE — all compete by LST slack.
                 # STAGING_PREFILL: completed blocks are in tree cache; deferring is safe.
                 if queuing_capacity_exhausted:
-                    continue  # Batch full; still scan for STAGING_DECODE further down
+                    continue  # Batch full; still scan for STAGING_DECODE further down (non-LST)
 
                 if len(adder.can_run_list) >= self.get_num_allocatable_reqs(running_bs):
                     self.running_batch.batch_is_full = True

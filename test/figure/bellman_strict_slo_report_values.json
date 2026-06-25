@@ -1,0 +1,72 @@
+{
+  "sharegpt": {
+    "zero": {
+      "strict_ttfb": 0.852,
+      "strict_tpob": 0.722,
+      "strict_all": 0.722
+    },
+    "worst": {
+      "strict_ttfb": 0.891,
+      "strict_tpob": 0.737,
+      "strict_all": 0.737
+    },
+    "bellman": {
+      "strict_ttfb": 0.897,
+      "strict_tpob": 0.761,
+      "strict_all": 0.761
+    },
+    "oracle": {
+      "strict_ttfb": 0.9,
+      "strict_tpob": 0.773,
+      "strict_all": 0.773
+    }
+  },
+  "ruler_4k": {
+    "zero": {
+      "strict_ttfb": 0.343,
+      "strict_tpob": 0.249,
+      "strict_all": 0.249
+    },
+    "worst": {
+      "strict_ttfb": 0.981,
+      "strict_tpob": 0.967,
+      "strict_all": 0.967
+    },
+    "bellman": {
+      "strict_ttfb": 0.984,
+      "strict_tpob": 0.972,
+      "strict_all": 0.972
+    },
+    "oracle": {
+      "strict_ttfb": 0.995,
+      "strict_tpob": 0.991,
+      "strict_all": 0.991
+    }
+  },
+  "gsm8k": {
+    "_meta": {
+      "label": "GSM8K",
+      "slo_type": "relaxed"
+    },
+    "zero": {
+      "relaxed_ttfb": 0.742,
+      "relaxed_tpob": 0.635,
+      "relaxed_all": 0.628
+    },
+    "worst": {
+      "relaxed_ttfb": 0.708,
+      "relaxed_tpob": 0.665,
+      "relaxed_all": 0.663
+    },
+    "bellman": {
+      "relaxed_ttfb": 0.793,
+      "relaxed_tpob": 0.723,
+      "relaxed_all": 0.718
+    },
+    "oracle": {
+      "relaxed_ttfb": 0.731,
+      "relaxed_tpob": 0.752,
+      "relaxed_all": 0.731
+    }
+  }
+}

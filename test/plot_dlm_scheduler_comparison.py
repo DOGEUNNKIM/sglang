@@ -44,6 +44,7 @@ STYLE = {
     "SOLA": {"label": "SOLA", "color": "#C44E52", "marker": "s", "linestyle": "-"},
     "FCFS": {"label": "FCFS", "color": "#55A868", "marker": "D", "linestyle": "-"},
     "PREFILL": {"label": "PREFILL", "color": "#64B5CD", "marker": "v", "linestyle": "-"},
+    "TTFB": {"label": "TTFB", "color": "#E377C2", "marker": "o", "linestyle": "-"},
 }
 
 METRIC_SUFFIX = {
@@ -800,6 +801,574 @@ def plot_bar_p99(
     print(f"[plot] wrote {output}")
 
 
+def default_breakdown_bar_output(output: Path) -> Path:
+    return output.with_name(f"{output.stem}_breakdown_bar{output.suffix}")
+
+
+def _breakdown_components(
+    p99_total: float,
+    mean_total: Optional[float],
+    mean_parts: List[Optional[float]],
+) -> List[float]:
+    """Scale mean component proportions to sum to p99_total.
+
+    If any component is missing, falls back to uniform split of the remainder.
+    Returns a list of heights that sum exactly to p99_total.
+    """
+    if mean_total is None or mean_total <= 0:
+        n = len(mean_parts)
+        return [p99_total / n] * n
+
+    scale = p99_total / mean_total
+    parts = [(v or 0.0) * scale for v in mean_parts]
+
+    # Clamp negatives and normalise to preserve total
+    parts = [max(0.0, v) for v in parts]
+    total_parts = sum(parts)
+    if total_parts <= 0:
+        n = len(parts)
+        return [p99_total / n] * n
+
+    factor = p99_total / total_parts
+    return [v * factor for v in parts]
+
+
+def plot_breakdown_bar(
+    summary: Summary,
+    output: Path,
+    task: str,
+    rate: str,
+    schedulers: List[str],
+    slo_ttfb_ms: Optional[float],
+    slo_tpob_ms: Optional[float],
+    title: Optional[str],
+    dpi: int,
+) -> None:
+    def _float_metric(metrics: Mapping[str, float], key: str) -> Optional[float]:
+        value = metrics.get(key)
+        if value is None:
+            return None
+        return float(value)
+
+    labels: List[str] = []
+    p95_ttfb_list: List[float] = []
+    p95_tpob_list: List[float] = []
+    ttfb_parts: List[List[float]] = []
+    tpob_parts: List[List[float]] = []
+    ttfb_known_sums: List[float] = []
+    tpob_known_sums: List[float] = []
+
+    for scheduler in schedulers:
+        metrics = summary.get(scheduler, {}).get(rate, {}).get(task)
+        if not metrics:
+            continue
+        p95_ttfb = _float_metric(metrics, "p95_ttfb_selected_total_ms")
+        if p95_ttfb is None:
+            p95_ttfb = _float_metric(metrics, "p95_ttfb_ms")
+        p95_tpob = _float_metric(metrics, "p95_tpob_selected_total_ms")
+        if p95_tpob is None:
+            p95_tpob = _float_metric(metrics, "p95_tpob_ms")
+        if p95_ttfb is None or p95_tpob is None:
+            continue
+
+        ttfb_forward = _float_metric(metrics, "p95_ttfb_selected_forward_ms")
+        if ttfb_forward is None:
+            ttfb_forward = _float_metric(metrics, "p95_ideal_ttfb_ms") or 0.0
+        ttfb_sched_wait = _float_metric(metrics, "p95_ttfb_selected_sched_wait_ms")
+        if ttfb_sched_wait is None:
+            ttfb_sched_wait = _float_metric(metrics, "p95_sched_wait_ms") or 0.0
+        ttfb_first_unmask_gap = _float_metric(metrics, "p95_ttfb_selected_first_unmask_gap_ms")
+        if ttfb_first_unmask_gap is None:
+            ttfb_first_unmask_gap = _float_metric(metrics, "p95_first_unmask_gap_ms") or 0.0
+        ttfb_first_block_dw = _float_metric(metrics, "p95_ttfb_selected_first_block_decode_wait_ms") or 0.0
+        ttfb_other = _float_metric(metrics, "p95_ttfb_selected_other_ms")
+
+        tpob_forward = _float_metric(metrics, "p95_tpob_selected_forward_ms")
+        if tpob_forward is None:
+            tpob_forward = _float_metric(metrics, "p95_ideal_tpob_ms") or 0.0
+        tpob_decode_wait = _float_metric(metrics, "p95_tpob_selected_decode_wait_ms")
+        if tpob_decode_wait is None:
+            tpob_decode_wait = _float_metric(metrics, "p95_decode_wait_ms") or 0.0
+        tpob_other = _float_metric(metrics, "p95_tpob_selected_other_ms")
+
+        ttfb_known = ttfb_forward + ttfb_sched_wait + ttfb_first_unmask_gap + ttfb_first_block_dw
+        if ttfb_other is None:
+            ttfb_other = max(0.0, p95_ttfb - ttfb_known)
+        tpob_known = tpob_forward + tpob_decode_wait
+        if tpob_other is None:
+            tpob_other = max(0.0, p95_tpob - tpob_known)
+
+        labels.append(STYLE.get(scheduler, {}).get("label", scheduler))
+        p95_ttfb_list.append(p95_ttfb)
+        p95_tpob_list.append(p95_tpob)
+        ttfb_parts.append([ttfb_forward, ttfb_sched_wait, ttfb_first_unmask_gap, ttfb_first_block_dw, ttfb_other])
+        tpob_parts.append([tpob_forward, tpob_decode_wait, tpob_other])
+        ttfb_known_sums.append(ttfb_known + ttfb_other)
+        tpob_known_sums.append(tpob_known + tpob_other)
+
+    if not labels:
+        print(f"[plot] no breakdown data for task={task!r} rate={rate!r}; skipped breakdown bar")
+        return
+
+    # ── colours / hatches / labels ────────────────────────────────────────────
+    # TTFB bottom -> top: [forward, sched_wait, first_unmask_gap, first_block_dw, others]
+    TTFB_COLORS  = ["#E8A838", "#FAD7A0", "#FADEA0", "#C97A00", "#B8B8B8"]
+    TTFB_HATCHES = [None,      None,      "\\",      "////",    ".."]
+    TTFB_LABELS  = ["Forward", "Prefill delay", "P-D delay", "Decode delay", "Others"]
+
+    # TPOB bottom -> top: [forward, decode_wait, others]
+    TPOB_COLORS  = ["#AED6F1", "#154360", "#B8B8B8"]
+    TPOB_HATCHES = [None,      "//",      ".."]
+    TPOB_LABELS  = ["Forward", "Decode delay", "Others"]
+
+    n = len(labels)
+    width = 0.35
+    xs = list(range(n))
+    ttfb_xs = [x - width / 2 for x in xs]
+    tpob_xs = [x + width / 2 for x in xs]
+
+    fig, ax = plt.subplots(figsize=(max(7.0, 2.0 * n), 7.5))
+
+    max_val = max(
+        max(p95_ttfb_list),
+        max(p95_tpob_list),
+        max(ttfb_known_sums),
+        max(tpob_known_sums),
+    )
+    offset = max_val * 0.008
+
+    # ── TTFB stacked bars ─────────────────────────────────────────────────────
+    ttfb_bottoms = [0.0] * n
+    for i, (color, hatch, lbl) in enumerate(zip(TTFB_COLORS, TTFB_HATCHES, TTFB_LABELS)):
+        heights = [ttfb_parts[j][i] if i < len(ttfb_parts[j]) else 0.0 for j in range(n)]
+        ax.bar(ttfb_xs, heights, width, bottom=ttfb_bottoms,
+               color=color, hatch=hatch, edgecolor="white", linewidth=0.5)
+        if i == 0:  # annotate forward compute only
+            for j, (bx, h, bot) in enumerate(zip(ttfb_xs, heights, ttfb_bottoms)):
+                if h >= p95_ttfb_list[j] * 0.04:
+                    ax.text(bx, bot + h / 2, f"{h:.0f}", ha="center", va="center",
+                            fontsize=8, color="black", fontweight="bold")
+        ttfb_bottoms = [b + h for b, h in zip(ttfb_bottoms, heights)]
+
+    for j, (bx, total, known) in enumerate(zip(ttfb_xs, p95_ttfb_list, ttfb_known_sums)):
+        label_y = max(total, known)
+        ax.text(bx, label_y + offset, f"{total:.0f} ms", ha="center", va="bottom",
+                fontsize=9, fontweight="bold", color="#7D5C00")
+
+    # ── TPOB stacked bars ─────────────────────────────────────────────────────
+    tpob_bottoms = [0.0] * n
+    for i, (color, hatch, lbl) in enumerate(zip(TPOB_COLORS, TPOB_HATCHES, TPOB_LABELS)):
+        heights = [tpob_parts[j][i] if i < len(tpob_parts[j]) else 0.0 for j in range(n)]
+        ax.bar(tpob_xs, heights, width, bottom=tpob_bottoms,
+               color=color, hatch=hatch, edgecolor="white", linewidth=0.5)
+        if i == 0:  # annotate forward compute only
+            for j, (bx, h, bot) in enumerate(zip(tpob_xs, heights, tpob_bottoms)):
+                if h >= p95_tpob_list[j] * 0.04:
+                    ax.text(bx, bot + h / 2, f"{h:.0f}", ha="center", va="center",
+                            fontsize=8, color="black", fontweight="bold")
+        tpob_bottoms = [b + h for b, h in zip(tpob_bottoms, heights)]
+
+    for j, (bx, total, known) in enumerate(zip(tpob_xs, p95_tpob_list, tpob_known_sums)):
+        label_y = max(total, known)
+        ax.text(bx, label_y + offset, f"{total:.0f} ms", ha="center", va="bottom",
+                fontsize=9, fontweight="bold", color="#154360")
+
+    # ── SLO lines with right-side value labels ────────────────────────────────
+    if slo_ttfb_ms is not None:
+        ax.axhline(slo_ttfb_ms, color="#E8A838", linestyle="--", linewidth=1.8, zorder=3)
+        ax.text(1.01, slo_ttfb_ms, f"TTFB SLO ({slo_ttfb_ms:.0f} ms)",
+                transform=ax.get_yaxis_transform(), ha="left", va="center",
+                fontsize=8.5, color="#B8820A", fontweight="bold", clip_on=False)
+    if slo_tpob_ms is not None:
+        ax.axhline(slo_tpob_ms, color="#2980B9", linestyle="--", linewidth=1.8, zorder=3)
+        ax.text(1.01, slo_tpob_ms, f"TPOB SLO ({slo_tpob_ms:.0f} ms)",
+                transform=ax.get_yaxis_transform(), ha="left", va="center",
+                fontsize=8.5, color="#2980B9", fontweight="bold", clip_on=False)
+
+    ax.set_xticks(xs)
+    ax.set_xticklabels(labels, fontsize=11)
+    ax.set_ylabel("Latency (ms)", fontsize=12)
+    ax.grid(True, axis="y", color="#dddddd", linestyle="--", linewidth=0.8, alpha=0.85)
+    ax.set_axisbelow(True)
+    ax.tick_params(axis="both", labelsize=9)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.set_title(
+        title or f"p95 TTFB & TPOB Delay Breakdown — {task.upper()} @ {rate} req/s",
+        fontsize=13, fontweight="bold",
+    )
+
+    # ── Bottom legends: 3 separate boxes ─────────────────────────────────────
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+
+    _lkw = dict(fontsize=8.5, frameon=True, framealpha=1.0, edgecolor="#aaaaaa",
+                fancybox=False, borderpad=0.6)
+
+    slo_handles = []
+    if slo_ttfb_ms is not None:
+        slo_handles.append(Line2D([0], [0], color="#E8A838", linestyle="--", linewidth=1.5,
+                                   label=f"TTFB SLO ({slo_ttfb_ms:.0f} ms)"))
+    if slo_tpob_ms is not None:
+        slo_handles.append(Line2D([0], [0], color="#2980B9", linestyle="--", linewidth=1.5,
+                                   label=f"TPOB SLO ({slo_tpob_ms:.0f} ms)"))
+
+    group_handles = [
+        Patch(facecolor="#E8A838", edgecolor="#cccccc", label="TTFB p95 (total)"),
+        Patch(facecolor="#AED6F1", edgecolor="#cccccc", label="TPOB p95 (total)"),
+    ]
+
+    ttfb_comp_handles = [
+        Patch(facecolor=c, hatch=h or "", edgecolor="white" if h else "#cccccc", label=lbl)
+        for i, (c, h, lbl) in enumerate(zip(TTFB_COLORS, TTFB_HATCHES, TTFB_LABELS))
+    ]
+    tpob_comp_handles = [
+        Patch(facecolor=c, hatch=h or "", edgecolor="white" if h else "#cccccc", label=lbl)
+        for i, (c, h, lbl) in enumerate(zip(TPOB_COLORS, TPOB_HATCHES, TPOB_LABELS))
+    ]
+
+    x_groups = 0.20 if slo_handles else 0.0
+    x_comps  = x_groups + 0.20
+
+    extra_artists = []
+    if slo_handles:
+        leg1 = ax.legend(handles=slo_handles, loc="upper left",
+                         bbox_to_anchor=(0.0, -0.12), bbox_transform=ax.transAxes,
+                         title="SLO Lines", title_fontsize=8.5, **_lkw)
+        leg1.get_frame().set_linewidth(0.8)
+        ax.add_artist(leg1)
+        extra_artists.append(leg1)
+
+    leg2 = ax.legend(handles=group_handles, loc="upper left",
+                     bbox_to_anchor=(x_groups, -0.12), bbox_transform=ax.transAxes,
+                     title="Bar Groups (Totals)", title_fontsize=8.5, **_lkw)
+    leg2.get_frame().set_linewidth(0.8)
+    ax.add_artist(leg2)
+    extra_artists.append(leg2)
+
+    leg3 = ax.legend(handles=ttfb_comp_handles + tpob_comp_handles, loc="upper left",
+                     bbox_to_anchor=(x_comps, -0.06), bbox_transform=ax.transAxes,
+                     title="Delay Components (Stacked)", title_fontsize=8.5,
+                     ncol=2, **_lkw)
+    leg3.get_frame().set_linewidth(0.8)
+    extra_artists.append(leg3)
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=dpi, bbox_inches="tight", bbox_extra_artists=extra_artists)
+    plt.close(fig)
+    print(f"[plot] wrote {output}")
+
+
+def default_user_experiment_output(output: Path) -> Path:
+    return output.with_name(f"{output.stem}_user_experiment{output.suffix}")
+
+
+def collect_p95_pair_series(
+    summary: Summary,
+    scheduler: str,
+    task: str,
+) -> Tuple[List[float], List[float], List[float]]:
+    rates: List[float] = []
+    ttfb_vals: List[float] = []
+    tpob_vals: List[float] = []
+
+    for rate, rate_data in summary.get(scheduler, {}).items():
+        metrics = rate_data.get(task)
+        if not metrics:
+            continue
+        ttfb = metrics.get("p95_ttfb_ms")
+        tpob = metrics.get("p95_tpob_ms")
+        if ttfb is None or tpob is None:
+            continue
+        rates.append(rate_key(rate))
+        ttfb_vals.append(float(ttfb))
+        tpob_vals.append(float(tpob))
+
+    triples = sorted(zip(rates, ttfb_vals, tpob_vals), key=lambda triple: triple[0])
+    if not triples:
+        return [], [], []
+    return [t[0] for t in triples], [t[1] for t in triples], [t[2] for t in triples]
+
+
+def _draw_user_trajectory(
+    ax,
+    summary: Summary,
+    task: str,
+    schedulers: List[str],
+    slo_ttfb_ms: Optional[float],
+    slo_tpob_ms: Optional[float],
+) -> Tuple[List, List[str]]:
+    series: List[Tuple[str, List[float], List[float], List[float]]] = []
+    all_rates: List[float] = []
+    all_xs: List[float] = []
+    all_ys: List[float] = []
+
+    for scheduler in schedulers:
+        rates, xs, ys = collect_p95_pair_series(summary, scheduler, task)
+        if not xs:
+            continue
+        series.append((scheduler, rates, xs, ys))
+        all_rates.extend(rates)
+        all_xs.extend(xs)
+        all_ys.extend(ys)
+
+    if not series:
+        raise ValueError(f"No p95 TTFB/TPOB data found for task={task!r}.")
+
+    max_x = max(all_xs + ([slo_ttfb_ms] if slo_ttfb_ms is not None else []))
+    max_y = max(all_ys + ([slo_tpob_ms] if slo_tpob_ms is not None else []))
+    x_max = max_x * 1.12
+    y_max = max_y * 1.12
+    ax.set_xlim(0, x_max)
+    ax.set_ylim(0, y_max)
+
+    if slo_ttfb_ms is not None and slo_tpob_ms is not None:
+        y_frac = min(max(slo_tpob_ms / y_max, 0.0), 1.0)
+        ax.axvspan(0, slo_ttfb_ms, ymin=0, ymax=y_frac, facecolor="#EAF4E9", alpha=0.95, zorder=0)
+        ax.axvspan(0, slo_ttfb_ms, ymin=y_frac, ymax=1, facecolor="#FFF7E8", alpha=0.85, zorder=0)
+        ax.axvspan(slo_ttfb_ms, x_max, ymin=0, ymax=y_frac, facecolor="#FFF7E8", alpha=0.85, zorder=0)
+        ax.axvspan(slo_ttfb_ms, x_max, ymin=y_frac, ymax=1, facecolor="#FCEEEE", alpha=0.85, zorder=0)
+        ax.axvline(slo_ttfb_ms, color="#444444", linestyle="--", linewidth=1.8, alpha=0.9, zorder=2)
+        ax.axhline(slo_tpob_ms, color="#444444", linestyle="--", linewidth=1.8, alpha=0.9, zorder=2)
+
+        ax.text(
+            slo_ttfb_ms + x_max * 0.012,
+            y_max * 0.965,
+            f"First-block SLO\n{slo_ttfb_ms:.0f} ms",
+            ha="left",
+            va="top",
+            fontsize=11,
+            color="#222222",
+        )
+        ax.text(
+            x_max * 0.67,
+            slo_tpob_ms + y_max * 0.012,
+            f"Inter-block delay SLO = {slo_tpob_ms:.0f} ms",
+            ha="left",
+            va="bottom",
+            fontsize=11,
+            color="#222222",
+        )
+        ax.text(x_max * 0.04, y_max * 0.085, "satisfy\nboth", fontsize=11, color="#222222")
+        ax.text(x_max * 0.04, y_max * 0.52, "inter-block\nviolation", fontsize=11, color="#222222")
+        ax.text(x_max * 0.62, y_max * 0.11, "first-block\nviolation", fontsize=11, color="#222222")
+        ax.text(x_max * 0.64, y_max * 0.52, "both\nviolate", fontsize=11, color="#222222")
+
+    if all_rates:
+        sorted_rates = sorted(set(all_rates))
+        start_label, end_label = nice_rate_labels([sorted_rates[0], sorted_rates[-1]])
+        order_label = f"{start_label} -> {end_label}"
+        ax.text(
+            0.015,
+            0.96,
+            f"marker order: {order_label} req/s",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=11,
+            color="#222222",
+        )
+
+    label_offsets = {
+        "TTFB": (10, -18),
+        "DECODE": (-88, 6),
+        "LST": (10, 0),
+        "SOLA": (10, 2),
+        "FCFS": (10, -2),
+        "PREFILL": (-88, 10),
+    }
+
+    handles = []
+    labels: List[str] = []
+    for scheduler, _rates, xs, ys in series:
+        style = STYLE.get(scheduler, {})
+        color = style.get("color")
+        label = style.get("label", scheduler)
+        (line,) = ax.plot(
+            xs,
+            ys,
+            label=label,
+            color=color,
+            marker=style.get("marker", "o"),
+            linestyle=style.get("linestyle", "-"),
+            linewidth=2.5,
+            markersize=7.5,
+            markeredgecolor="white",
+            markeredgewidth=0.9,
+            zorder=4,
+        )
+        handles.append(line)
+        labels.append(label)
+
+        for x0, y0, x1, y1 in zip(xs, ys, xs[1:], ys[1:]):
+            ax.annotate(
+                "",
+                xy=(x1, y1),
+                xytext=(x0, y0),
+                arrowprops={
+                    "arrowstyle": "->",
+                    "color": color,
+                    "lw": 1.8,
+                    "alpha": 0.82,
+                    "shrinkA": 8,
+                    "shrinkB": 8,
+                },
+                zorder=5,
+            )
+
+        dx, dy = label_offsets.get(scheduler, (8, 8))
+        ax.annotate(
+            label,
+            xy=(xs[-1], ys[-1]),
+            xytext=(dx, dy),
+            textcoords="offset points",
+            ha="left" if dx >= 0 else "right",
+            va="center",
+            fontsize=10.5,
+            color="#111111",
+        )
+
+    ax.set_xlabel("p95 Time until first block (ms)", fontsize=13)
+    ax.set_ylabel("p95 Max delay between consecutive blocks (ms)", fontsize=13)
+    ax.grid(True, axis="both", color="#dddddd", linewidth=0.8, alpha=0.75)
+    ax.set_axisbelow(True)
+    ax.tick_params(axis="both", labelsize=10)
+    ax.set_title(
+        "New SLO violation trajectory under increasing request rate",
+        fontsize=17,
+        pad=14,
+    )
+    ax.legend(
+        handles,
+        labels,
+        loc="upper right",
+        ncol=2,
+        frameon=False,
+        fontsize=10.5,
+        handlelength=2.6,
+    )
+    return handles, labels
+
+
+def _draw_user_rate_panels(
+    axes,
+    summary: Summary,
+    task: str,
+    schedulers: List[str],
+    slo_ttfb_ms: Optional[float],
+    slo_tpob_ms: Optional[float],
+) -> Tuple[List, List[str]]:
+    ax_ttfb, ax_tpob = axes
+    panels = [
+        (ax_ttfb, "p95_ttfb_ms", "p95 Time to First Token (ms)\n(Response Speed)", slo_ttfb_ms),
+        (ax_tpob, "p95_tpob_ms", "p95 Max Inter-Block Gap (ms)\n(Response Continuity)", slo_tpob_ms),
+    ]
+
+    for ax, field, ylabel, slo_val in panels:
+        all_rates = set()
+        for scheduler in schedulers:
+            xs, ys = collect_series(summary, scheduler, task, field)
+            if not xs:
+                continue
+            all_rates.update(xs)
+            style = STYLE.get(scheduler, {})
+            ax.plot(
+                xs,
+                ys,
+                label=style.get("label", scheduler),
+                color=style.get("color"),
+                marker=style.get("marker", "o"),
+                linestyle=style.get("linestyle", "-"),
+                linewidth=2.0,
+                markersize=5.0,
+            )
+
+        if slo_val is not None:
+            ax.axhline(
+                slo_val,
+                color="#444444",
+                linestyle="--",
+                linewidth=1.5,
+                alpha=0.85,
+            )
+            ax.text(
+                0.02,
+                slo_val,
+                f"SLO\n{slo_val:.0f}",
+                transform=ax.get_yaxis_transform(),
+                va="bottom",
+                ha="left",
+                fontsize=9,
+                color="#444444",
+            )
+
+        if all_rates:
+            sorted_rates = sorted(all_rates)
+            ax.set_xticks(sorted_rates)
+            ax.set_xticklabels(nice_rate_labels(sorted_rates), fontsize=9)
+            xmin, xmax = min(sorted_rates), max(sorted_rates)
+            pad = max((xmax - xmin) * 0.07, 0.1)
+            ax.set_xlim(xmin - pad, xmax + pad)
+
+        ax.set_xlabel(f"{task.upper()} Req/s", fontsize=11)
+        ax.set_ylabel(ylabel, fontsize=11)
+        ax.grid(True, axis="both", color="#dddddd", linewidth=0.8, alpha=0.85)
+        ax.set_axisbelow(True)
+        ax.tick_params(axis="y", labelsize=9)
+
+    handles, labels = ax_ttfb.get_legend_handles_labels()
+    if not handles:
+        handles, labels = ax_tpob.get_legend_handles_labels()
+    return handles, labels
+
+
+def plot_user_experiment(
+    summary: Summary,
+    output: Path,
+    task: str,
+    schedulers: List[str],
+    slo_ttfb_ms: Optional[float],
+    slo_tpob_ms: Optional[float],
+    title: Optional[str],
+    dpi: int,
+) -> None:
+    """Combined user-experiment figure.
+
+    Top: p95 TTFB/TPOB trajectory as request rate increases.
+    Bottom: the previous two request-rate panels for p95 TTFB and p95 TPOB.
+    """
+    fig = plt.figure(figsize=(13.5, 12.0), constrained_layout=True)
+    grid = fig.add_gridspec(2, 2, height_ratios=[1.28, 1.0], hspace=0.22, wspace=0.18)
+    ax_trajectory = fig.add_subplot(grid[0, :])
+    ax_ttfb = fig.add_subplot(grid[1, 0])
+    ax_tpob = fig.add_subplot(grid[1, 1])
+
+    _draw_user_trajectory(
+        ax=ax_trajectory,
+        summary=summary,
+        task=task,
+        schedulers=schedulers,
+        slo_ttfb_ms=slo_ttfb_ms,
+        slo_tpob_ms=slo_tpob_ms,
+    )
+    _draw_user_rate_panels(
+        axes=(ax_ttfb, ax_tpob),
+        summary=summary,
+        task=task,
+        schedulers=schedulers,
+        slo_ttfb_ms=slo_ttfb_ms,
+        slo_tpob_ms=slo_tpob_ms,
+    )
+
+    if title:
+        fig.suptitle(title, fontsize=15, y=0.995)
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[plot] wrote {output}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Plot DLM scheduler SLO attainment from slo_summary.json.",
@@ -872,6 +1441,20 @@ def main() -> None:
     )
     parser.add_argument("--title", type=str, default=None, help="Figure title.")
     parser.add_argument("--dpi", type=int, default=200, help="Output image DPI.")
+    parser.add_argument("--no-breakdown", action="store_true",
+                        help="Do not draw the stacked breakdown bar figure.")
+    parser.add_argument("--breakdown-output", type=Path, default=None,
+                        help="Output path for breakdown bar. Defaults to '<output_stem>_breakdown_bar.<ext>'.")
+    parser.add_argument("--no-user-experiment", action="store_true",
+                        help="Do not draw the user-experiment (Korean label) figure.")
+    parser.add_argument("--user-experiment-output", type=Path, default=None,
+                        help="Output path for user-experiment figure. Defaults to '<output_stem>_user_experiment.<ext>'.")
+    parser.add_argument("--user-experiment-task", type=str, default=None,
+                        help="Task to show in the user-experiment figure. Defaults to --bar-task.")
+    parser.add_argument("--ue-slo-ttfb-ms", type=float, default=None,
+                        help="TTFB SLO in ms for user-experiment figure (horizontal dashed line).")
+    parser.add_argument("--ue-slo-tpob-ms", type=float, default=None,
+                        help="TPOB SLO in ms for user-experiment figure (horizontal dashed line).")
     parser.add_argument("--no-bar", action="store_true", help="Do not draw the bar p99 figure.")
     parser.add_argument("--bar-output", type=Path, default=None,
                         help="Output path for bar chart. Defaults to '<output_stem>_bar_p99.<ext>'.")
@@ -963,6 +1546,54 @@ def main() -> None:
             schedulers=schedulers,
             slo_ttfb_ms=bar_slo_ttfb,
             slo_tpob_ms=bar_slo_tpob,
+            title=args.title,
+            dpi=args.dpi,
+        )
+    if not args.no_breakdown:
+        bd_slo_ttfb = args.bar_slo_ttfb_ms
+        bd_slo_tpob = args.bar_slo_tpob_ms
+        if (bd_slo_ttfb is None or bd_slo_tpob is None) and args.bar_task:
+            cfg_path = args.slo_config or (args.output.parent / "slo_config.json")
+            if cfg_path.exists():
+                import json as _json
+                task_slo = _json.loads(cfg_path.read_text()).get(args.bar_task, {})
+                strict = task_slo.get("strict", {})
+                if bd_slo_ttfb is None:
+                    bd_slo_ttfb = strict.get("ttfb_ms")
+                if bd_slo_tpob is None:
+                    bd_slo_tpob = strict.get("tpob_ms")
+        plot_breakdown_bar(
+            summary=summary,
+            output=args.breakdown_output or default_breakdown_bar_output(args.output),
+            task=args.bar_task,
+            rate=args.bar_rate,
+            schedulers=schedulers,
+            slo_ttfb_ms=bd_slo_ttfb,
+            slo_tpob_ms=bd_slo_tpob,
+            title=args.title,
+            dpi=args.dpi,
+        )
+    if not args.no_user_experiment:
+        ue_task = args.user_experiment_task or args.bar_task
+        ue_slo_ttfb = args.ue_slo_ttfb_ms
+        ue_slo_tpob = args.ue_slo_tpob_ms
+        if (ue_slo_ttfb is None or ue_slo_tpob is None) and ue_task:
+            cfg_path = args.slo_config or (args.output.parent / "slo_config.json")
+            if cfg_path.exists():
+                import json as _json
+                task_slo = _json.loads(cfg_path.read_text()).get(ue_task, {})
+                strict = task_slo.get("strict", {})
+                if ue_slo_ttfb is None:
+                    ue_slo_ttfb = strict.get("ttfb_ms")
+                if ue_slo_tpob is None:
+                    ue_slo_tpob = strict.get("tpob_ms")
+        plot_user_experiment(
+            summary=summary,
+            output=args.user_experiment_output or default_user_experiment_output(args.output),
+            task=ue_task,
+            schedulers=schedulers,
+            slo_ttfb_ms=ue_slo_ttfb,
+            slo_tpob_ms=ue_slo_tpob,
             title=args.title,
             dpi=args.dpi,
         )

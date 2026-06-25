@@ -1,0 +1,116 @@
+{
+  "model": "SDAR",
+  "source": "manual_table_from_user",
+  "task_step_variability": [
+    {
+      "domain": "Code",
+      "task": "humaneval",
+      "steps_per_block_mean": 11.48,
+      "steps_per_block_std": 6.51,
+      "steps_per_block_cov": 0.567,
+      "steps_per_block_cov_over_mean": 0.0494,
+      "throughput_speedup": 1.55
+    },
+    {
+      "domain": "Long context",
+      "task": "ruler_1k",
+      "steps_per_block_mean": 13.52,
+      "steps_per_block_std": 6.77,
+      "steps_per_block_cov": 0.501,
+      "steps_per_block_cov_over_mean": 0.0371,
+      "throughput_speedup": 1.44
+    },
+    {
+      "domain": "Math",
+      "task": "gsm8k",
+      "steps_per_block_mean": 17.16,
+      "steps_per_block_std": 9.64,
+      "steps_per_block_cov": 0.562,
+      "steps_per_block_cov_over_mean": 0.0327,
+      "throughput_speedup": 1.37
+    },
+    {
+      "domain": "ChatBot",
+      "task": "sharegpt",
+      "steps_per_block_mean": 15.56,
+      "steps_per_block_std": 6.08,
+      "steps_per_block_cov": 0.391,
+      "steps_per_block_cov_over_mean": 0.0251,
+      "throughput_speedup": 1.23
+    },
+    {
+      "domain": "Reasoning",
+      "task": "math",
+      "steps_per_block_mean": 16.14,
+      "steps_per_block_std": 6.87,
+      "steps_per_block_cov": 0.426,
+      "steps_per_block_cov_over_mean": 0.0264,
+      "throughput_speedup": 1.13
+    },
+    {
+      "domain": "Reasoning",
+      "task": "gpqa",
+      "steps_per_block_mean": 20.62,
+      "steps_per_block_std": 7.99,
+      "steps_per_block_cov": 0.387,
+      "steps_per_block_cov_over_mean": 0.0188,
+      "throughput_speedup": 1.03
+    },
+    {
+      "domain": "Knowledge",
+      "task": "mmlu",
+      "steps_per_block_mean": 23.71,
+      "steps_per_block_std": 7.9,
+      "steps_per_block_cov": 0.333,
+      "steps_per_block_cov_over_mean": 0.0141,
+      "throughput_speedup": 1.01
+    }
+  ],
+  "long_context_step_variability": [
+    {
+      "domain": "Long context",
+      "task": "ruler_1k",
+      "steps_per_block_mean": 13.52,
+      "steps_per_block_std": 6.77,
+      "steps_per_block_cov": 0.501,
+      "steps_per_block_cov_over_mean": 0.0371,
+      "throughput_speedup": 1.44
+    },
+    {
+      "domain": "Long context",
+      "task": "ruler_2k",
+      "steps_per_block_mean": 12.43,
+      "steps_per_block_std": 6.54,
+      "steps_per_block_cov": 0.526,
+      "steps_per_block_cov_over_mean": 0.0424,
+      "throughput_speedup": 1.22
+    },
+    {
+      "domain": "Long context",
+      "task": "ruler_1_4k",
+      "steps_per_block_mean": 11.49,
+      "steps_per_block_std": 6.19,
+      "steps_per_block_cov": 0.538,
+      "steps_per_block_cov_over_mean": 0.0468,
+      "throughput_speedup": 1.21
+    },
+    {
+      "domain": "Long context",
+      "task": "ruler_3k",
+      "steps_per_block_mean": 11.89,
+      "steps_per_block_std": 6.59,
+      "steps_per_block_cov": 0.554,
+      "steps_per_block_cov_over_mean": 0.0466,
+      "throughput_speedup": 1.17
+    },
+    {
+      "domain": "Long context",
+      "task": "ruler_4k",
+      "steps_per_block_mean": 10.85,
+      "steps_per_block_std": 5.61,
+      "steps_per_block_cov": 0.517,
+      "steps_per_block_cov_over_mean": 0.0477,
+      "throughput_speedup": 1.05
+    }
+  ]
+}

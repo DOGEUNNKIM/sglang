@@ -1,0 +1,196 @@
+{
+  "model": "LLaDA2.0",
+  "source": "manual_table_from_user",
+  "task_step_variability": [
+    {
+      "domain": "Code",
+      "task": "humaneval",
+      "steps_per_block_mean": 4.68,
+      "steps_per_block_std": 4.48,
+      "steps_per_block_cov": 0.958,
+      "steps_per_block_cov_over_mean": 0.204,
+      "throughput_speedup": 2.46
+    },
+    {
+      "domain": "Reasoning",
+      "task": "math",
+      "steps_per_block_mean": 10.95,
+      "steps_per_block_std": 6.74,
+      "steps_per_block_cov": 0.616,
+      "steps_per_block_cov_over_mean": 0.056,
+      "throughput_speedup": 1.71
+    },
+    {
+      "domain": "Math",
+      "task": "gsm8k",
+      "steps_per_block_mean": 13.96,
+      "steps_per_block_std": 6.88,
+      "steps_per_block_cov": 0.493,
+      "steps_per_block_cov_over_mean": 0.035,
+      "throughput_speedup": 1.56
+    },
+    {
+      "domain": "ChatBot",
+      "task": "sharegpt",
+      "steps_per_block_mean": 20.89,
+      "steps_per_block_std": 8.63,
+      "steps_per_block_cov": 0.413,
+      "steps_per_block_cov_over_mean": 0.021,
+      "throughput_speedup": 1.21
+    },
+    {
+      "domain": "Knowledge",
+      "task": "mmlu",
+      "steps_per_block_mean": 20.75,
+      "steps_per_block_std": 8.09,
+      "steps_per_block_cov": 0.39,
+      "steps_per_block_cov_over_mean": 0.018,
+      "throughput_speedup": 1.2
+    },
+    {
+      "domain": "Reasoning",
+      "task": "gpqa",
+      "steps_per_block_mean": 20.68,
+      "steps_per_block_std": 7.72,
+      "steps_per_block_cov": 0.373,
+      "steps_per_block_cov_over_mean": 0.018,
+      "throughput_speedup": 1.16
+    },
+    {
+      "domain": "Long context",
+      "task": "ruler_1k",
+      "steps_per_block_mean": 14.0,
+      "steps_per_block_std": 9.04,
+      "steps_per_block_cov": 0.646,
+      "steps_per_block_cov_over_mean": 0.046,
+      "throughput_speedup": 1.77
+    }
+  ],
+  "throughput_scaling": [
+    {
+      "token_block_batch": "2048/32/64",
+      "tokens": 2048,
+      "block_size": 32,
+      "batch_size": 64,
+      "benchmark": "GSM8K",
+      "baseline_effectiveness": 866.3,
+      "effectiveness_scale_up": 2.3,
+      "throughput_speedup": 1.6,
+      "our_throughput": 1203.0,
+      "baseline_throughput": 751.0,
+      "group": "purple"
+    },
+    {
+      "token_block_batch": "1024/32/32",
+      "tokens": 1024,
+      "block_size": 32,
+      "batch_size": 32,
+      "benchmark": "GSM8K",
+      "baseline_effectiveness": 492.15,
+      "effectiveness_scale_up": 1.99,
+      "throughput_speedup": 1.58,
+      "our_throughput": 967.0,
+      "baseline_throughput": 606.0,
+      "group": "purple"
+    },
+    {
+      "token_block_batch": "512/32/16",
+      "tokens": 512,
+      "block_size": 32,
+      "batch_size": 16,
+      "benchmark": "GSM8K",
+      "baseline_effectiveness": 267.1,
+      "effectiveness_scale_up": 1.91,
+      "throughput_speedup": 1.57,
+      "our_throughput": 702.5,
+      "baseline_throughput": 445.0,
+      "group": "purple"
+    },
+    {
+      "token_block_batch": "2048/64/32",
+      "tokens": 2048,
+      "block_size": 64,
+      "batch_size": 32,
+      "benchmark": "GSM8K",
+      "baseline_effectiveness": 1016.2,
+      "effectiveness_scale_up": 1.97,
+      "throughput_speedup": 1.63,
+      "our_throughput": 689.9,
+      "baseline_throughput": 421.5,
+      "group": "red"
+    },
+    {
+      "token_block_batch": "1024/32/32",
+      "tokens": 1024,
+      "block_size": 32,
+      "batch_size": 32,
+      "benchmark": "GSM8K",
+      "baseline_effectiveness": 492.15,
+      "effectiveness_scale_up": 1.99,
+      "throughput_speedup": 1.58,
+      "our_throughput": 967.0,
+      "baseline_throughput": 606.0,
+      "group": "red"
+    },
+    {
+      "token_block_batch": "512/16/32",
+      "tokens": 512,
+      "block_size": 16,
+      "batch_size": 32,
+      "benchmark": "GSM8K",
+      "baseline_effectiveness": 224.6,
+      "effectiveness_scale_up": 2.06,
+      "throughput_speedup": 1.47,
+      "our_throughput": 979.5,
+      "baseline_throughput": 662.8,
+      "group": "red"
+    }
+  ],
+  "long_context_step_variability": [
+    {
+      "domain": "Long context",
+      "task": "ruler_4k",
+      "steps_per_block_mean": 6.95,
+      "steps_per_block_std": 6.31,
+      "steps_per_block_cov": 0.908,
+      "steps_per_block_cov_over_mean": 0.13,
+      "throughput_speedup": 1.34
+    },
+    {
+      "domain": "Long context",
+      "task": "ruler_3k",
+      "steps_per_block_mean": 9.31,
+      "steps_per_block_std": 8.17,
+      "steps_per_block_cov": 0.878,
+      "steps_per_block_cov_over_mean": 0.094,
+      "throughput_speedup": 1.43
+    },
+    {
+      "domain": "Long context",
+      "task": "ruler_1~4k mix",
+      "steps_per_block_mean": 10.76,
+      "steps_per_block_std": 8.8,
+      "steps_per_block_cov": 0.817,
+      "steps_per_block_cov_over_mean": 0.076,
+      "throughput_speedup": 1.6
+    },
+    {
+      "domain": "Long context",
+      "task": "ruler_2k",
+      "steps_per_block_mean": 11.2,
+      "steps_per_block_std": 8.66,
+      "steps_per_block_cov": 0.774,
+      "steps_per_block_cov_over_mean": 0.069,
+      "throughput_speedup": 1.63
+    },
+    {
+      "domain": "Long context",
+      "task": "ruler_1k",
+      "steps_per_block_mean": 14.0,
+      "steps_per_block_std": 9.04,
+      "steps_per_block_cov": 0.646,
+      "steps_per_block_cov_over_mean": 0.046,
+      "throughput_speedup": 1.77
+    }
+  ]
+}

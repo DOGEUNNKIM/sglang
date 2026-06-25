@@ -65,16 +65,57 @@ class DllmConfig:
 
         self.bellman_log_file: str | None = algorithm_config.get("bellman_log_file") or None
         self.bellman_block_count: int = 0
+        self._bellman_log_fh = None  # persistent file handle; avoids open/close per block
+
+        # How to estimate remaining decode forwards for slack / TTFB-compute calculation.
+        # "bellman": online Bellman table V[r] (default)
+        # "zero":    assume 0 remaining compute (EDF-style)
+        # "worst":            assume 1 mask resolved per forward → r forwards needed
+        # "oracle":           load pre-computed empirical-mean table (frozen, no updates)
+        # "warm_start":       load bellman's converged table (last log entry), frozen
+        # "warm_start_continue": load bellman's converged table, continue updating
+        _mode = algorithm_config.get("remaining_compute_mode", "bellman")
+        if _mode not in ("bellman", "zero", "worst", "oracle", "warm_start", "warm_start_continue"):
+            raise ValueError(
+                f"remaining_compute_mode must be one of "
+                f"'bellman', 'zero', 'worst', 'oracle', 'warm_start', 'warm_start_continue'; "
+                f"got {_mode!r}"
+            )
+        self.remaining_compute_mode: str = _mode
+
+        if _mode in ("oracle", "warm_start", "warm_start_continue"):
+            import json as _json
+            _oracle_path = algorithm_config.get("oracle_table_path")
+            if _oracle_path:
+                with open(_oracle_path) as _f:
+                    _table = _json.load(_f)
+                if len(_table) != self.block_size + 1:
+                    raise ValueError(
+                        f"oracle_table has {len(_table)} entries, expected {self.block_size + 1}"
+                    )
+                self.decode_forwards_by_remaining = [float(v) for v in _table]
+                # warm_start_continue resumes from a pre-converged state:
+                # set counts to 400 so the initial step is at the minimum (0.1),
+                # preventing large oscillations around the warm-started values.
+                if _mode == "warm_start_continue":
+                    self._update_counts = [400] * (self.block_size + 1)
+            else:
+                import warnings
+                warnings.warn(
+                    f"remaining_compute_mode={_mode!r} but oracle_table_path not set; "
+                    "using default initialization (equivalent to untrained bellman)"
+                )
 
         if self.bellman_log_file:
             import json, time as _time
-            with open(self.bellman_log_file, "w") as _bf:
-                _bf.write(json.dumps({
-                    "block": 0,
-                    "time": _time.perf_counter(),
-                    "table": list(self.decode_forwards_by_remaining),
-                    "traj": [],
-                }) + "\n")
+            self._bellman_log_fh = open(self.bellman_log_file, "w")
+            self._bellman_log_fh.write(json.dumps({
+                "block": 0,
+                "time": _time.perf_counter(),
+                "table": list(self.decode_forwards_by_remaining),
+                "traj": [],
+            }) + "\n")
+            self._bellman_log_fh.flush()
 
     def _clamp_remaining_masks(self, remaining_masked_tokens: int | None) -> int:
         if remaining_masked_tokens is None:
@@ -87,6 +128,8 @@ class DllmConfig:
         observed_steps: float,
     ) -> None:
         """Stochastic median update: step = max(0.1, 2/sqrt(n)) per r, skips r=0."""
+        if self.remaining_compute_mode in ("oracle", "warm_start"):
+            return  # frozen table — never updated during inference
         r = self._clamp_remaining_masks(remaining)
         if r <= 0:
             return
@@ -104,6 +147,19 @@ class DllmConfig:
             return 0
         estimated_forwards = self.decode_forwards_by_remaining[remaining]
         return max(1, math.ceil(self.decode_safety_factor * estimated_forwards))
+
+    def estimate_decode_forwards_by_mode(self, r: int) -> int:
+        """Return estimated decode forwards according to remaining_compute_mode.
+
+        r: remaining masked tokens (already clamped to [0, block_size]).
+        """
+        if self.remaining_compute_mode == "zero":
+            return 0
+        if self.remaining_compute_mode == "worst":
+            return r  # one mask unmasked per forward → r forwards needed
+        # "bellman": online table with safety factor
+        # "oracle":  pre-loaded converged table (frozen) — same lookup path as bellman
+        return max(1, math.ceil(self.decode_safety_factor * self.decode_forwards_by_remaining[r]))
 
     def use_lst(self) -> bool:
         """True if Least Slack Time scheduling is active."""

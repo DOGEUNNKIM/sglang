@@ -7,11 +7,11 @@ MODEL_PATH="${MODEL_PATH:-inclusionAI/LLaDA2.0-mini}" #JetLM/SDAR-8B-Chat inclus
 WARMUP="${WARMUP:-32}"
 MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-32}"
 NUM_OUTPUT_BLOCKS="${NUM_OUTPUT_BLOCKS:-0}"
-REQUEST_RATES=(${REQUEST_RATES:-200})
-TASKS=(${TASKS:-humaneval math gsm8k gpqa mmlu sharegpt ruler_4k}) ##### TASK humaneval math gsm8k gpqa mmlu sharegpt ruler_1k ruler_2k ruler_3k ruler_4k ruler_1_4k
+REQUEST_RATES=(${REQUEST_RATES:-1000})
+TASKS=(${TASKS:-mmlu}) ##### TASK humaneval math gsm8k gpqa mmlu sharegpt ruler_1k ruler_2k ruler_3k ruler_4k ruler_1_4k
 SCHEDULER="${SCHEDULER:-FCFS}"               # LST | PREFILL | DECODE | FCFS | SOLA | TTFB
-NUM_EXAMPLES="${NUM_EXAMPLES:-200}"
-NUM_THREADS_SWEEP=(${NUM_THREADS_SWEEP:-200})
+NUM_EXAMPLES="${NUM_EXAMPLES:-1000}"
+NUM_THREADS_SWEEP=(${NUM_THREADS_SWEEP:-1000})
 ###### hyper parameter ######
 
 SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/nvme0/kdg6245}"
@@ -348,6 +348,39 @@ for rate in rates:
             print(f'{task:<14} {rate:>6} {s:>8} {t:>10}')
         except Exception as e:
             print(f'{task:<14} {rate:>6} {\"ERR\":>8} {str(e)[:10]:>10}')
+"
+
+echo
+echo "============================================================"
+echo "Effective Token Budget Summary"
+echo "============================================================"
+python3 -c "
+import json
+from pathlib import Path
+
+output_root = '${OUTPUT_ROOT}'
+rates = '${REQUEST_RATES[*]}'.split()
+tasks = '${TASKS[*]}'.split()
+model_tag = '${MODEL_PATH}'.replace('/', '_')
+
+print(f\"{'Task':<14} {'Rate':>6} {'ETB mean':>10} {'ETB p50':>10} {'ETB p95':>10}\")
+print('-' * 54)
+for rate in rates:
+    for task in tasks:
+        p = Path(output_root) / f'request_rate_{rate}' / task / f'{task}_{model_tag}.json'
+        if not p.exists():
+            print(f'{task:<14} {rate:>6} {\"N/A\":>10} {\"N/A\":>10} {\"N/A\":>10}')
+            continue
+        try:
+            d = json.loads(p.read_text())
+            ls = d.get('latency_stats', {})
+            mean_etb = ls.get('mean_effective_token_budget')
+            p50_etb  = ls.get('p50_effective_token_budget')
+            p95_etb  = ls.get('p95_effective_token_budget')
+            fmt = lambda v: f'{v:.1f}' if v is not None else 'N/A'
+            print(f'{task:<14} {rate:>6} {fmt(mean_etb):>10} {fmt(p50_etb):>10} {fmt(p95_etb):>10}')
+        except Exception as e:
+            print(f'{task:<14} {rate:>6} {\"ERR\":>10} {str(e)[:10]:>10}')
 "
 
 echo

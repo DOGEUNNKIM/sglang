@@ -63,6 +63,10 @@ class ReqDllmMixin:
         # prefill→first_unmask gap: time from last prefill forward → first unmask batch
         self.dllm_prefill_end_time: Optional[float] = None
         self.dllm_first_unmask_gap: Optional[float] = None
+        # inter-unmask-step gaps accumulated within the first block (lost by
+        # clear_dllm_active_block before record_dllm_completed_block_decode_wait
+        # can save them, since dllm_last_block_time is None for the first block)
+        self.dllm_first_block_decode_wait: Optional[float] = None
         # LST scheduling: per-phase deadline, admission timestamp, and assigned SLO tier
         self.dllm_current_deadline: Optional[float] = None
         self.dllm_admission_time: Optional[float] = None
@@ -168,7 +172,7 @@ class ReqDllmMixin:
             r = block_size if partial == 0 else block_size - partial
         else:
             r = block_size
-        decode_forwards = max(1, math.ceil(cfg.decode_safety_factor * cfg.decode_forwards_by_remaining[r]))
+        decode_forwards = cfg.estimate_decode_forwards_by_mode(r)
 
         if self.dllm_first_block_time is None:
             # TTFB phase: prefill progress already reflected via prefix_indices
@@ -204,7 +208,7 @@ class ReqDllmMixin:
         else:
             partial = len(self.origin_input_ids) % block_size
             r = block_size if partial == 0 else block_size - partial
-        decode_forwards = max(1, math.ceil(cfg.decode_safety_factor * cfg.decode_forwards_by_remaining[r]))
+        decode_forwards = cfg.estimate_decode_forwards_by_mode(r)
 
         total_prefill = math.ceil(len(self.origin_input_ids) / block_size)
         completed = max(len(self.prefix_indices), self.dllm_prefetched_prefix_len) // block_size
