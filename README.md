@@ -36,11 +36,11 @@ run_*.sh
 ## Installation
 
 ```text
-### Use the last release branch
+# Use the last release branch
 git clone https://github.com/DOGEUNNKIM/sglang.git
 cd sglang
 
-### Install the python packages
+# Install the python packages
 pip install --upgrade pip
 pip install -e "python"
 ```
