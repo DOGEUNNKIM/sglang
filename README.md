@@ -33,6 +33,17 @@ run_*.sh
   -> optionally re-generates plots with finalize/plot scripts
 ```
 
+## Installation
+
+### Use the last release branch
+git clone https://github.com/DOGEUNNKIM/sglang.git
+cd sglang
+
+### Install the python packages
+pip install --upgrade pip
+pip install -e "python"
+
+
 ## File Overview
 
 | File | Role |
