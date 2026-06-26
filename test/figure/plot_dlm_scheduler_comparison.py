@@ -268,8 +268,9 @@ TASK_LABELS = {
 SMALL_SUBPLOT_TITLE_FONTSIZE = 11
 SUMMARY_SUBPLOT_TITLE_FONTSIZE = 30
 SCATTER_SUBPLOT_TITLE_FONTSIZE = 22
+SCATTER_LEGEND_FONTSIZE = 26
 COMBINED_SCATTER_TITLE_FONTSIZE = 18
-LEGEND_BORDERPAD = 0.05
+LEGEND_BORDERPAD = 0.1
 LEGEND_LABELSPACING = 0.05
 LEGEND_HANDLEHEIGHT = 0.55
 LEGEND_HANDLE_TEXT_PAD = 0.35
@@ -494,21 +495,31 @@ def plot_summary_multi(
         pos = axes[exp_idx][0].get_position()
         y_center = (pos.y0 + pos.y1) / 2
         axes[exp_idx][0].set_ylabel(f"{exp_label}", fontsize=26, fontweight="bold", labelpad=25)
-        add_right_ylabel(fig, "SLO Attain.", x=0.113, y=y_center)
+        add_right_ylabel(fig, "SLOAttain", x=0.113, y=y_center)
 
     handles, labels = axes[0][0].get_legend_handles_labels()
     if handles:
+        _LEGEND_ORDER = ["LST", "SOLA", "TTFB", "DECODE", "PREFILL", "FCFS"]
+        _sched_label_map = {str(presentation_style(s).get("label", s)): s for s in _LEGEND_ORDER}
+        _ss_label = str(presentation_style("LST").get("label", "ShiftServe"))
+        _paired = [(h, (l + " (Ours)" if l == _ss_label else l)) for h, l in zip(handles, labels)]
+        def _legend_key(pair):
+            base = pair[1].replace(" (Ours)", "")
+            s = _sched_label_map.get(base)
+            return _LEGEND_ORDER.index(s) if s in _LEGEND_ORDER else len(_LEGEND_ORDER)
+        _paired.sort(key=_legend_key)
+        handles, labels = zip(*_paired) if _paired else ([], [])
         leg = fig.legend(
             handles,
             labels,
             loc="upper center",
             ncol=min(len(labels), 6),
             frameon=True,
-            bbox_to_anchor=(0.5, 0.99),
+            bbox_to_anchor=(0.518, 0.99),
             bbox_transform=fig.transFigure,
             fontsize=SUMMARY_SUBPLOT_TITLE_FONTSIZE,
-            columnspacing=1.5,
-            handlelength=2,
+            columnspacing=1.8,
+            handlelength=1.8,
             handletextpad=LEGEND_HANDLE_TEXT_PAD,
             handleheight=LEGEND_HANDLEHEIGHT,
             borderpad=LEGEND_BORDERPAD,
@@ -519,6 +530,10 @@ def plot_summary_multi(
         for h in leg.legend_handles:
             h.set_linewidth(3.5)
             h.set_alpha(1.0)
+        for txt in leg.get_texts():
+            if "ShiftServe" in txt.get_text():
+                txt.set_fontweight("bold")
+                txt.set_fontsize(txt.get_fontsize() - 2)
         leg.get_frame().set_facecolor((1, 1, 1, 0.7))
         leg.get_frame().set_edgecolor("#aaaaaa")
         leg.get_frame().set_linewidth(1.2)
@@ -716,6 +731,8 @@ def plot_p99_summary_multi(
         scheduler for scheduler in schedulers
         if not normalize_baseline or scheduler != normalize_baseline
     ]
+    _LEGEND_ORDER_P99 = ["LST", "SOLA", "TTFB", "DECODE", "PREFILL", "FCFS"]
+    box_schedulers.sort(key=lambda s: _LEGEND_ORDER_P99.index(s) if s in _LEGEND_ORDER_P99 else len(_LEGEND_ORDER_P99))
     if not box_schedulers:
         print("[plot] no non-baseline schedulers found; skipped p99 latency plot")
         return
@@ -860,16 +877,18 @@ def plot_p99_summary_multi(
             alpha=0.62,
             label=(
                 f"{presentation_style(scheduler).get('short')}: {presentation_style(scheduler).get('label', scheduler)}"
+                + (" (Ours)" if scheduler == "LST" else "")
                 if presentation_style(scheduler).get("short")
                 else str(presentation_style(scheduler).get("label", scheduler))
+                + (" (Ours)" if scheduler == "LST" else "")
             ),
         )
         for scheduler in box_schedulers
     ]
     if normalize_baseline:
         baseline_label = str(presentation_style(normalize_baseline).get("label", normalize_baseline))
-        legend_handles.append(
-            Line2D([0], [0], color="#E41A1C", linestyle="--", linewidth=2.4, label=f"{baseline_label}")
+        legend_handles.insert(
+            0, Line2D([0], [0], color="#E41A1C", linestyle="--", linewidth=3, label=f"{baseline_label} (Ours)")
         )
 
     leg = fig.legend(
@@ -877,11 +896,11 @@ def plot_p99_summary_multi(
         loc="upper center",
         ncol=min(len(legend_handles), 6),
         frameon=True,
-        bbox_to_anchor=(0.55, 0.98),
+        bbox_to_anchor=(0.555, 0.98),
         bbox_transform=fig.transFigure,
         fontsize=SUMMARY_SUBPLOT_TITLE_FONTSIZE,
-        columnspacing=1.5,
-        handlelength=2,
+        columnspacing=1.2,
+        handlelength=1.5,
         handletextpad=LEGEND_HANDLE_TEXT_PAD,
         handleheight=LEGEND_HANDLEHEIGHT,
         borderpad=LEGEND_BORDERPAD,
@@ -890,6 +909,10 @@ def plot_p99_summary_multi(
     )
     for h in leg.legend_handles:
         h.set_alpha(1.0)
+    for txt in leg.get_texts():
+        if "ShiftServe" in txt.get_text():
+            txt.set_fontweight("bold")
+            txt.set_fontsize(txt.get_fontsize() - 2)
     leg.get_frame().set_facecolor((1, 1, 1, 0.7))
     leg.get_frame().set_edgecolor("#aaaaaa")
     leg.get_frame().set_linewidth(1.2)
@@ -1056,13 +1079,15 @@ def plot_scatter_ttfb_tpob(
         slo_relaxed = inferred_relaxed
 
     # Load and split records per scheduler
+    _SCATTER_ORDER = ["LST", "SOLA", "TTFB", "DECODE", "PREFILL", "FCFS"]
+    schedulers = sorted(schedulers, key=lambda s: _SCATTER_ORDER.index(s) if s in _SCATTER_ORDER else len(_SCATTER_ORDER))
     sched_split: List[Tuple[str, str, List, List, List, List, List, List]] = []
     for scheduler in schedulers:
         run_dir = latency_root / f"scheduler_{scheduler}" / f"request_rate_{rate}" / task
         records = _read_scatter_request_records(run_dir, task)
         if not records:
             continue
-        label = presentation_style(scheduler).get("label", scheduler)
+        label = str(presentation_style(scheduler).get("label", scheduler)) + (" (Ours)" if scheduler == "LST" else "")
         color = str(presentation_style(scheduler).get("color", "#888888"))
         sx, sy, rx, ry, ox, oy = _split_records(records)
         sched_split.append((label, color, sx, sy, rx, ry, ox, oy))
@@ -1088,6 +1113,15 @@ def plot_scatter_ttfb_tpob(
     from matplotlib.ticker import FuncFormatter
     _ms_to_s = FuncFormatter(lambda v, _: f"{int(round(v / 1000))}")
 
+    # Push axes from TTFB (index 2) onward right to widen the SOLA–TTFB gap
+    _sched_labels = [s[0] for s in sched_split]
+    _ttfb_col = next((i for i, (lbl, *_) in enumerate(sched_split)
+                      if str(presentation_style("TTFB").get("label", "TTFB")) == lbl), None)
+    if _ttfb_col is not None:
+        for _ci in range(_ttfb_col, n):
+            _pos = axes[0][_ci].get_position()
+            axes[0][_ci].set_position([_pos.x0 + 0.006, _pos.y0, _pos.width, _pos.height])
+
     for col, (label, sched_color, sx, sy, rx, ry, ox, oy) in enumerate(sched_split):
         ax = axes[0][col]
         dot_s = _STRICT_COLOR  if color_by_tier else sched_color
@@ -1096,15 +1130,15 @@ def plot_scatter_ttfb_tpob(
         if sx:
             s_met_x, s_met_y, s_viol_x, s_viol_y = _split_by_slo(sx, sy, slo_strict)
             if s_met_x:
-                ax.scatter(s_met_x, s_met_y, s=5, alpha=0.55, color=_lighten_color(dot_s), label="Strict (Attainment)", rasterized=True)
+                ax.scatter(s_met_x, s_met_y, s=5, alpha=0.55, color=_lighten_color(dot_s), label="Strict (Attain.)", rasterized=True)
             if s_viol_x:
                 ax.scatter(s_viol_x, s_viol_y, s=5, alpha=0.95, color=dot_s, label="Strict (Violated)", rasterized=True)
         if rx:
             r_met_x, r_met_y, r_viol_x, r_viol_y = _split_by_slo(rx, ry, slo_relaxed)
             if r_met_x:
-                ax.scatter(r_met_x, r_met_y, s=5, alpha=0.55, color=_lighten_color(dot_r), label="Release (Attainment)", rasterized=True)
+                ax.scatter(r_met_x, r_met_y, s=5, alpha=0.55, color=_lighten_color(dot_r), label="Relaxed (Attain.)", rasterized=True)
             if r_viol_x:
-                ax.scatter(r_viol_x, r_viol_y, s=5, alpha=0.95, color=dot_r, label="Release (Violated)", rasterized=True)
+                ax.scatter(r_viol_x, r_viol_y, s=5, alpha=0.95, color=dot_r, label="Relaxed (Violated)", rasterized=True)
         if ox:
             ax.scatter(ox, oy, s=5, alpha=0.6, color=dot_o, label="other", rasterized=True)
         _draw_slo_lines(ax, bool(sx), bool(rx), bool(ox), slo_strict, slo_relaxed, single_mode=single_type)
@@ -1118,9 +1152,15 @@ def plot_scatter_ttfb_tpob(
         ax.set_axisbelow(True)
         ax.tick_params(axis="both", labelsize=16)
 
-    # shared legend at top
+    # shared legend at top — collect from all axes to catch labels missing in first subplot
     from matplotlib.lines import Line2D
-    handles, labels_leg = axes[0][0].get_legend_handles_labels()
+    _seen_labels: dict = {}
+    for _ax in axes[0]:
+        for _h, _l in zip(*_ax.get_legend_handles_labels()):
+            if _l not in _seen_labels:
+                _seen_labels[_l] = _h
+    handles = list(_seen_labels.values())
+    labels_leg = list(_seen_labels.keys())
     if single_type:
         handles.append(Line2D([0], [0], color="#111111", linestyle="--", linewidth=3.0))
         labels_leg.append("strict TTFB")
@@ -1134,15 +1174,15 @@ def plot_scatter_ttfb_tpob(
             handles.append(Line2D([0], [0], color="#4472C4", linestyle="--", linewidth=2.2))
             labels_leg.append("release SLO")
     leg = fig.legend(handles, labels_leg, loc="upper center", ncol=len(handles),
-                     fontsize=SCATTER_SUBPLOT_TITLE_FONTSIZE, frameon=True, markerscale=4,
-                     bbox_to_anchor=(0.52, 0.99), bbox_transform=fig.transFigure,
-                     handletextpad=LEGEND_HANDLE_TEXT_PAD,
-                     handlelength=1.2,
+                     fontsize=SCATTER_LEGEND_FONTSIZE, frameon=True, markerscale=4,
+                     bbox_to_anchor=(0.51, 0.99), bbox_transform=fig.transFigure,
+                     handletextpad=0.2,
+                     handlelength=1,
                      handleheight=LEGEND_HANDLEHEIGHT,
-                     borderpad=LEGEND_BORDERPAD,
+                     borderpad=0.0,
                      labelspacing=LEGEND_LABELSPACING,
                      borderaxespad=0.0,
-                     columnspacing=0.5)
+                     columnspacing=0.67)
     for handle, label in zip(leg.legend_handles, labels_leg):
         if label.startswith("strict"):
             handle.set_alpha(1.0)
@@ -1579,8 +1619,8 @@ def plot_block_unmask_steps(
     #    fontsize=30,
     #    pad=14,
     #)
-    ax.set_xlabel("Masked Tokens", fontsize=36)
-    ax.set_ylabel("Unmask Steps", fontsize=36)
+    ax.set_xlabel("Number of Masked Tokens", fontsize=36)
+    ax.set_ylabel("Remaining Iter.", fontsize=36)
     ax.set_xlim(0.4, max_x + 0.6)
     ax.set_xticks(list(range(0, max_x + 1, 8)))
 
@@ -1751,7 +1791,7 @@ def plot_breakdown_bar(
         "prefill": {"label": "Server  Queue", "color": "#ED9736", "hatch": None},
         "pd": {"label": "Prefill    Queue", "color": "#6AA982", "hatch": None},
         "decode": {"label": "Decode Queue", "color": "#8DA9D8", "hatch": None},
-        "forward": {"label": "Forward", "color": "#9E9E9E", "hatch": None},
+        "forward": {"label": "Iteration", "color": "#9E9E9E", "hatch": None},
         "other": {"label": "Others", "color": "#9E9E9E", "hatch": "**"},
     }
 
@@ -1884,6 +1924,8 @@ def plot_breakdown_bar(
         fontsize=34,
         fontweight="bold",
     )
+    for tick, row in zip(ax_ttfb.get_yticklabels(), rows):
+        tick.set_color("#000000" if row["scheduler"] == "LST" else "#555555")
     ax_ttfb.invert_yaxis()
 
     region_handles = [
@@ -2015,6 +2057,8 @@ def _draw_user_trajectory(
 
     if not series:
         raise ValueError(f"No p95 TTFB/TPOB data found for task={task!r}.")
+    _DRAW_ORDER = ["TTFB", "LST", "SOLA", "DECODE", "FCFS", "PREFILL"]
+    series.sort(key=lambda t: _DRAW_ORDER.index(t[0]) if t[0] in _DRAW_ORDER else len(_DRAW_ORDER))
 
     slo_ttfb_s = slo_ttfb_ms / 1000.0 if slo_ttfb_ms is not None else None
     slo_tpob_s = slo_tpob_ms / 1000.0 if slo_tpob_ms is not None else None
@@ -2113,6 +2157,7 @@ def _draw_user_trajectory(
         line_color = mcolors.to_rgba(color, line_alpha)
         label = style.get("label", scheduler)
         label = "First Block Priority" if scheduler == "TTFB" else label
+        label = "ShiftServe (Ours)" if scheduler == "LST" else label
         ax.scatter(
             xs,
             ys,
@@ -2192,6 +2237,13 @@ def _draw_user_trajectory(
     #    fontsize=35,
     #    pad=16,
     #)
+    _LEGEND_ORDER = ["LST", "TTFB", "DECODE", "SOLA", "PREFILL", "FCFS"]
+    _label_to_sched = {str(PRESENTATION_STYLE.get(s, {}).get("label", s)): s for s in _LEGEND_ORDER}
+    _label_to_sched["ShiftServe (Ours)"] = "LST"
+    _label_to_sched["First Block Priority"] = "TTFB"
+    _paired_leg = sorted(zip(handles, labels),
+                         key=lambda p: _LEGEND_ORDER.index(_label_to_sched[p[1]]) if _label_to_sched.get(p[1]) in _LEGEND_ORDER else len(_LEGEND_ORDER))
+    handles, labels = zip(*_paired_leg) if _paired_leg else ([], [])
     leg = ax.legend(
         handles,
         labels,
@@ -2214,6 +2266,10 @@ def _draw_user_trajectory(
     leg.get_frame().set_linewidth(1.2)
     for lh in leg.legend_handles:
         lh.set_alpha(0.75)
+    for txt in leg.get_texts():
+        if "ShiftServe" in txt.get_text():
+            txt.set_fontweight("bold")
+            txt.set_fontsize(txt.get_fontsize() - 2)
     return handles, labels
 
 

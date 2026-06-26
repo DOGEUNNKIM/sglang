@@ -361,7 +361,7 @@ def plot_long_context_trend(llada: Mapping, sdar: Mapping, output: Path, dpi: in
             fy,
             color=LLADA_COLOR,
             linewidth=5,
-            label=f"LLADA($r={abs(r):.2f}$)",
+            label=f"LLaDA($r={abs(r):.2f}$)",
             zorder=2,
         )
     sdar_fit = log_x_linear_fit(sdar_rows)
@@ -513,7 +513,7 @@ def plot_bubble_opportunity_trend(llada: Mapping, sdar: Mapping, output: Path, d
             fy,
             color=LLADA_COLOR,
             linewidth=5,
-            label=f"LLADA ($r={abs(r):.2f}$)",
+            label=f"LLaDA ($r={abs(r):.2f}$)",
             zorder=2,
         )
     sdar_fit = log_x_linear_fit(sdar_rows)
@@ -702,9 +702,9 @@ def plot_gsm8k_effectiveness(llada: Mapping, output: Path, dpi: int) -> None:
 
     fig, ax = plt.subplots(1, 1, figsize=(8, 2.8), constrained_layout=True)
     block_bars = ax.barh(y_block, block_values, height=height, color=BLOCK_COLOR,
-                         edgecolor="#111111", linewidth=0.5, label="Block Level Batch")
+                         edgecolor="#111111", linewidth=0.5, label="Block-Level Batch")
     iter_bars = ax.barh(y_iter, iter_values, height=height, color=ITER_COLOR,
-                        edgecolor="#111111", linewidth=0.5, label="Iteration Level Batch")
+                        edgecolor="#111111", linewidth=0.5, label="Iteration-Level Batch")
     for bar, hatch, alpha in zip([*block_bars, *iter_bars], bar_hatches, bar_alphas):
         bar.set_hatch(hatch)
         bar.set_alpha(alpha)
